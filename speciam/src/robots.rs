@@ -20,14 +20,8 @@ use crate::url_base;
 pub enum RobotsErr {
     #[error("url_on_site cannot-be-a-base")]
     InvalidUrl,
-    #[error("Reqwest Error")]
-    Reqwest(reqwest::Error),
-}
-
-impl From<reqwest::Error> for RobotsErr {
-    fn from(value: reqwest::Error) -> Self {
-        Self::Reqwest(value)
-    }
+    #[error("Reqwest Error: {0:#?}")]
+    Reqwest(#[from] reqwest::Error),
 }
 
 /// Add the robots.txt for `url_on_site`'s domain to `robots`.

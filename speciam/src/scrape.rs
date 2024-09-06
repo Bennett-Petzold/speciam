@@ -1,9 +1,9 @@
-use std::cell::LazyCell;
+use std::{borrow::Borrow, cell::LazyCell, str::Utf8Error};
 
 use error_stack::Report;
 use reqwest::{
-    header::{ToStrError, CONTENT_TYPE},
-    Response, Url,
+    header::{HeaderMap, ToStrError, CONTENT_TYPE},
+    Url,
 };
 use select::{document::Document, predicate::Name};
 use thiserror::Error;
@@ -15,25 +15,22 @@ use crate::url_base;
 pub enum ScrapeError {
     #[error("No CONTENT_TYPE header in the response.")]
     NoContentType,
-    #[error("The CONTENT_TYPE header was not a valid string.")]
-    InvalidContentType(ToStrError),
-    #[error("Reqwest Error")]
-    Reqwest(reqwest::Error),
-}
-
-impl From<reqwest::Error> for ScrapeError {
-    fn from(value: reqwest::Error) -> Self {
-        Self::Reqwest(value)
-    }
+    #[error("The CONTENT_TYPE header was not a valid string: {0:#?}")]
+    InvalidContentType(#[from] ToStrError),
+    #[error("HTML could not be parsed as a UTF-8 string: {0:#?}")]
+    InvalidBody(#[from] Utf8Error),
 }
 
 /// Returns all referenced [`Url`]s, if this is an HTML document.
 ///
 /// If this is a non-html document, this returns an empty [`Vec`].
-pub async fn scrape(response: Response) -> Result<Vec<Url>, Report<ScrapeError>> {
-    let response_url = response.url().clone();
-
-    if let Some(content_type) = response.headers().get(CONTENT_TYPE) {
+pub async fn scrape<U, H, B>(url: U, headers: H, body: B) -> Result<Vec<Url>, Report<ScrapeError>>
+where
+    U: Borrow<Url>,
+    H: Borrow<HeaderMap>,
+    B: Borrow<[u8]>,
+{
+    if let Some(content_type) = headers.borrow().get(CONTENT_TYPE) {
         let content_type = content_type
             .to_str()
             .map_err(ScrapeError::InvalidContentType)?;
@@ -43,14 +40,10 @@ pub async fn scrape(response: Response) -> Result<Vec<Url>, Report<ScrapeError>>
             // <https://rustwiki.org/en/rust-cookbook/web/scraping.html>
 
             let body = Document::from(
-                response
-                    .text()
-                    .await
-                    .map_err(ScrapeError::Reqwest)?
-                    .as_str(),
+                std::str::from_utf8(body.borrow()).map_err(ScrapeError::InvalidBody)?,
             );
 
-            let base_url = LazyCell::new(|| url_base(response_url));
+            let base_url = LazyCell::new(|| url_base(url.borrow().clone()));
 
             Ok(body
                 .find(Name("a"))
@@ -87,9 +80,14 @@ mod tests {
             .join("install")
             .unwrap();
 
-        let scraped_urls = scrape(reqwest::get(homepage_url).await.unwrap())
-            .await
-            .unwrap();
+        let homepage_response = reqwest::get(homepage_url).await.unwrap();
+        let scraped_urls = scrape(
+            homepage_response.url().clone(),
+            homepage_response.headers().clone(),
+            homepage_response.bytes().await.unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert!(scraped_urls.contains(&install_url));
     }

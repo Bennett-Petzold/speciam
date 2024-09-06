@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-reqwest = "0.12"
+reqwest = { version = "0.12", features = ["stream"] }
 tokio = { version = "1", features = ["fs"] }
 governor = "0.6"
 robotstxt = "0.3"
@@ -12,6 +12,8 @@ error-stack = "0.5"
 thiserror = "1"
 select = "0.6"
 url = "2"
+bytes = "1.7"
+futures = "0.3"
 
 [dev-dependencies]
 tokio = { version = "*", features = ["macros", "rt-multi-thread"] }
