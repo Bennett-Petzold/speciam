@@ -152,20 +152,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, sync::LazyLock};
+    use std::str::FromStr;
 
     use reqwest::get;
 
-    use crate::test::CleaningTemp;
+    use crate::test::{CleaningTemp, CLIENT, GOOGLE_ROBOTS, LINUX_HOMEPAGE};
 
     use super::*;
-
-    const GOOGLE_ROBOTS: &str = "https://www.google.com/robots.txt";
-    const LINUX_HOMEPAGE: &str = "https://www.linux.org/";
-
-    const USER_AGENT: &str = "speciam";
-    static CLIENT: LazyLock<Client> =
-        LazyLock::new(|| Client::builder().user_agent(USER_AGENT).build().unwrap());
 
     #[tokio::test]
     async fn remove_dup() {

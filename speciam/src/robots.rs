@@ -305,20 +305,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, sync::LazyLock};
+    use std::str::FromStr;
+
+    use crate::test::{CLIENT, GOOGLE_HOMEPAGE, USER_AGENT, YAHOO_HOMEPAGE};
 
     use super::*;
 
-    const GOOGLE_BASE: &str = "https://www.google.com/";
-    const YAHOO_BASE: &str = "https://www.yahoo.com/";
-
-    const USER_AGENT: &str = "speciam";
-    static CLIENT: LazyLock<Client> =
-        LazyLock::new(|| Client::builder().user_agent(USER_AGENT).build().unwrap());
-
     #[tokio::test]
     async fn parse_robots() {
-        let base_url = Url::from_str(GOOGLE_BASE).unwrap();
+        let base_url = Url::from_str(GOOGLE_HOMEPAGE).unwrap();
 
         let search_url = base_url.join("search").unwrap();
         let about_url = base_url.join("search/about").unwrap();
@@ -378,7 +373,7 @@ mod tests {
         assert!(robots.processing.lock().unwrap().is_empty());
 
         // Query to a different domain should require a new load
-        let yahoo_url = Url::from_str(YAHOO_BASE).unwrap();
+        let yahoo_url = Url::from_str(YAHOO_HOMEPAGE).unwrap();
         let mut yahoo_fut = robots.check(&yahoo_url);
         assert!(matches!(futures::poll!(&mut yahoo_fut), Poll::Pending));
         assert!(matches!(yahoo_fut.state, RobotsCheckFutState::Loading(_)));

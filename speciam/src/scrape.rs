@@ -66,9 +66,9 @@ where
 mod tests {
     use std::str::FromStr;
 
-    use super::*;
+    use crate::test::RUST_HOMEPAGE;
 
-    const RUST_HOMEPAGE: &str = "https://www.rust-lang.org/";
+    use super::*;
 
     #[tokio::test]
     async fn scrape_for_url() {

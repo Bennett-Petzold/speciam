@@ -4,7 +4,20 @@ use std::{
     fs::remove_dir_all,
     ops::Deref,
     path::{Path, PathBuf},
+    sync::LazyLock,
 };
+
+use reqwest::Client;
+
+pub const RUST_HOMEPAGE: &str = "https://www.rust-lang.org/";
+pub const GOOGLE_ROBOTS: &str = "https://www.google.com/robots.txt";
+pub const LINUX_HOMEPAGE: &str = "https://www.linux.org/";
+pub const GOOGLE_HOMEPAGE: &str = "https://www.google.com/";
+pub const YAHOO_HOMEPAGE: &str = "https://www.yahoo.com/";
+
+pub const USER_AGENT: &str = "speciam";
+pub static CLIENT: LazyLock<Client> =
+    LazyLock::new(|| Client::builder().user_agent(USER_AGENT).build().unwrap());
 
 /// Temporary directory that attempts to clean itself up on [`Drop`].
 #[derive(Debug)]

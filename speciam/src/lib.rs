@@ -10,6 +10,9 @@ pub use scrape::*;
 mod download;
 pub use download::*;
 
+mod domain;
+pub use domain::*;
+
 #[cfg(test)]
 pub mod test;
 
@@ -109,17 +112,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, sync::LazyLock};
+    use std::str::FromStr;
 
-    use test::CleaningTemp;
+    use test::{CleaningTemp, CLIENT, RUST_HOMEPAGE, USER_AGENT};
 
     use super::*;
-
-    const RUST_HOMEPAGE: &str = "https://www.rust-lang.org/";
-
-    const USER_AGENT: &str = "speciam";
-    static CLIENT: LazyLock<Client> =
-        LazyLock::new(|| Client::builder().user_agent(USER_AGENT).build().unwrap());
 
     #[tokio::test]
     async fn dl_and_scrape_invalid_url() {

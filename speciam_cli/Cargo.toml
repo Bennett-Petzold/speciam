@@ -3,4 +3,14 @@ name = "speciam_cli"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+vendored = ["reqwest/native-tls-vendored"]
+compression = ["reqwest/brotli", "reqwest/deflate", "reqwest/gzip", "reqwest/zstd"]
+
 [dependencies]
+clap = { version = "4.5.11", features = ["derive"] }
+error-stack = "0.5.0"
+reqwest = { version = "0.12.7", features = ["http2", "rustls-tls"] }
+speciam = { path = "../speciam" }
+thiserror = "1.0.63"
+tokio = { version = "1.40.0", features = ["rt-multi-thread", "macros"] }

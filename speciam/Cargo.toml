@@ -3,6 +3,9 @@ name = "speciam"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+serde = ["dep:serde"]
+
 [dependencies]
 reqwest = { version = "0.12", features = ["stream"] }
 tokio = { version = "1", features = ["fs"] }
@@ -14,6 +17,9 @@ select = "0.6"
 url = "2"
 bytes = "1.7"
 futures = "0.3"
+once_map = "0.4.19"
+
+serde = { version = "1", optional = true, features = ["derive"] }
 
 [dev-dependencies]
 tokio = { version = "*", features = ["macros", "rt-multi-thread"] }
