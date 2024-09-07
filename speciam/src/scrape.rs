@@ -1,6 +1,5 @@
 use std::{borrow::Borrow, cell::LazyCell, str::Utf8Error};
 
-use error_stack::Report;
 use reqwest::{
     header::{HeaderMap, ToStrError, CONTENT_TYPE},
     Url,
@@ -13,18 +12,18 @@ use crate::url_base;
 
 #[derive(Debug, Error)]
 pub enum ScrapeError {
-    #[error("No CONTENT_TYPE header in the response.")]
+    #[error("no CONTENT_TYPE header in the response")]
     NoContentType,
-    #[error("The CONTENT_TYPE header was not a valid string: {0:#?}")]
+    #[error("CONTENT_TYPE header is not a valid string")]
     InvalidContentType(#[from] ToStrError),
-    #[error("HTML could not be parsed as a UTF-8 string: {0:#?}")]
+    #[error("HTML cannot be parsed as a UTF-8 string")]
     InvalidBody(#[from] Utf8Error),
 }
 
 /// Returns all referenced [`Url`]s, if this is an HTML document.
 ///
 /// If this is a non-html document, this returns an empty [`Vec`].
-pub async fn scrape<U, H, B>(url: U, headers: H, body: B) -> Result<Vec<Url>, Report<ScrapeError>>
+pub async fn scrape<U, H, B>(url: U, headers: H, body: B) -> Result<Vec<Url>, ScrapeError>
 where
     U: Borrow<Url>,
     H: Borrow<HeaderMap>,
@@ -59,7 +58,7 @@ where
             Ok(vec![])
         }
     } else {
-        Err(ScrapeError::NoContentType.into())
+        Err(ScrapeError::NoContentType)
     }
 }
 

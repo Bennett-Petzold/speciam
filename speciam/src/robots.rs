@@ -9,7 +9,6 @@ use std::{
     task::{ready, Context, Poll, Waker},
 };
 
-use error_stack::Report;
 use reqwest::{Client, StatusCode, Url};
 use robotstxt::DefaultMatcher;
 use thiserror::Error;
@@ -20,8 +19,10 @@ use crate::url_base;
 pub enum RobotsErr {
     #[error("url_on_site cannot-be-a-base")]
     InvalidUrl,
-    #[error("Reqwest Error: {0:#?}")]
-    Reqwest(#[from] reqwest::Error),
+    #[error("failure while getting response")]
+    Response(#[source] reqwest::Error),
+    #[error("failure while getting text body")]
+    Text(#[source] reqwest::Error),
 }
 
 /// Add the robots.txt for `url_on_site`'s domain to `robots`.
@@ -41,7 +42,7 @@ pub async fn get_robots<C, V, R>(
     visited: V,
     robots: R,
     url_on_site: Url,
-) -> Result<String, Report<RobotsErr>>
+) -> Result<String, RobotsErr>
 where
     C: Borrow<Client>,
     V: Borrow<RwLock<HashSet<Url>>>,
@@ -61,10 +62,10 @@ where
     }
 
     let robots_txt = match client.borrow().get(robots_url.clone()).send().await {
-        Ok(response) => response.text().await.map_err(RobotsErr::from)?,
+        Ok(response) => response.text().await.map_err(RobotsErr::Text)?,
         // Treat no `robots.txt` as full permission.
-        Err(e) if e.status().unwrap() == StatusCode::NOT_FOUND => "".to_string(),
-        Err(e) => return Err(Report::new(e.into())),
+        Err(e) if e.status() == Some(StatusCode::NOT_FOUND) => "".to_string(),
+        Err(e) => return Err(RobotsErr::Response(e)),
     };
 
     let _ = robots
@@ -110,7 +111,7 @@ impl<C, V> RobotsCheck<C, V> {
 )]
 enum RobotsCheckFutState<'a, Parent> {
     /// Finished checking
-    Computed(Result<bool, Report<RobotsErr>>),
+    Computed(Result<bool, RobotsErr>),
     /// Use result from other instance
     AttemptCompute((&'a Parent, &'a Url)),
     /// Queued for wakeup with Url and position
@@ -121,7 +122,7 @@ enum RobotsCheckFutState<'a, Parent> {
             &'a Parent,
             &'a Url,
             Url,
-            Pin<Box<dyn Future<Output = Result<String, Report<RobotsErr>>> + 'a>>,
+            Pin<Box<dyn Future<Output = Result<String, RobotsErr>> + 'a>>,
         ),
     ),
 }
@@ -172,7 +173,7 @@ where
     V: Borrow<RwLock<HashSet<Url>>> + Unpin + 'a,
     P: Borrow<RobotsCheck<C, V>> + Unpin + 'a,
 {
-    type Output = Result<bool, Report<RobotsErr>>;
+    type Output = Result<bool, RobotsErr>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
@@ -278,7 +279,7 @@ where
                 }
             }
         } else {
-            RobotsCheckFutState::Computed(Err(RobotsErr::InvalidUrl.into()))
+            RobotsCheckFutState::Computed(Err(RobotsErr::InvalidUrl))
         };
 
         Self {

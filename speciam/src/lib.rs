@@ -1,5 +1,7 @@
 mod robots;
-use reqwest::{header::CONTENT_TYPE, Response};
+use std::{borrow::Borrow, collections::HashSet, path::Path, sync::RwLock};
+
+use reqwest::{header::CONTENT_TYPE, Client, Response};
 pub use robots::*;
 
 mod scrape;
@@ -8,6 +10,10 @@ pub use scrape::*;
 mod download;
 pub use download::*;
 
+#[cfg(test)]
+pub mod test;
+
+use thiserror::Error;
 use url::Url;
 
 /// Converts `url` to a base [`Url`], if possible.
@@ -45,4 +51,107 @@ pub fn add_index(response: &Response) -> Url {
     }
 
     url
+}
+
+#[derive(Debug, Error)]
+pub enum DlAndScrapeErr {
+    /// Contains [`RobotsErr`].
+    #[error("failure while checking robots.txt")]
+    RobotsCheck(#[from] RobotsErr),
+    #[error("failure while making an initial request")]
+    GetResponse(#[from] reqwest::Error),
+    #[error("failure while downloading")]
+    Download(#[from] DownloadError),
+    #[error("failure while scraping")]
+    Scrape(#[from] ScrapeError),
+}
+
+/// For a unique URL, download into `base_path` and return any scraped URLs.
+///
+/// Composes [`RobotsCheck::check`], [`get_response`], [`download`], and
+/// [`scrape`] into one action.
+///
+/// # Parameters
+/// * `client`: [`Client`] to use for this operation.
+/// * `visited`: A set of already visited [`Url`]s.
+/// * `url`: The potentially unique [`Url`] to pull.
+/// * `base_path`: The base path for all files to write into.
+///
+/// # Return
+/// * Scraped urls and the background write handle.
+pub async fn dl_and_scrape<C, V, R, P>(
+    client: C,
+    visited: V,
+    robots: R,
+    base_path: P,
+    url: Url,
+) -> Result<Option<(Vec<Url>, WriteHandle)>, DlAndScrapeErr>
+where
+    C: Borrow<Client> + Unpin,
+    V: Borrow<RwLock<HashSet<Url>>> + Unpin,
+    R: Borrow<RobotsCheck<C, V>>,
+    P: Borrow<Path>,
+{
+    if robots.borrow().check(&url).await? {
+        if let Some(response) = get_response(client, visited, url.clone()).await? {
+            let headers = response.headers().clone();
+
+            let (content, write_handle) = download(response, base_path).await?;
+            let scraped = scrape(url, headers, content).await?;
+            Ok(Some((scraped, write_handle)))
+        } else {
+            Ok(None)
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{str::FromStr, sync::LazyLock};
+
+    use test::CleaningTemp;
+
+    use super::*;
+
+    const RUST_HOMEPAGE: &str = "https://www.rust-lang.org/";
+
+    const USER_AGENT: &str = "speciam";
+    static CLIENT: LazyLock<Client> =
+        LazyLock::new(|| Client::builder().user_agent(USER_AGENT).build().unwrap());
+
+    #[tokio::test]
+    async fn dl_and_scrape_invalid_url() {
+        let homepage_url = Url::from_str("https://weklrjwe.com").unwrap();
+        let visited = RwLock::default();
+
+        let robots_check = RobotsCheck::new(&*CLIENT, &visited, USER_AGENT.to_string());
+        assert!(dl_and_scrape(
+            &*CLIENT,
+            &visited,
+            &robots_check,
+            CleaningTemp::new(),
+            homepage_url.clone(),
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn dl_and_scrape_valid_url() {
+        let homepage_url = Url::from_str(RUST_HOMEPAGE).unwrap();
+        let visited = RwLock::default();
+
+        let robots_check = RobotsCheck::new(&*CLIENT, &visited, USER_AGENT.to_string());
+        dl_and_scrape(
+            &*CLIENT,
+            &visited,
+            &robots_check,
+            CleaningTemp::new(),
+            homepage_url,
+        )
+        .await
+        .unwrap();
+    }
 }

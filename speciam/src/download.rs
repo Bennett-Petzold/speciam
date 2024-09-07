@@ -1,7 +1,6 @@
 use std::{borrow::Borrow, collections::HashSet, io::ErrorKind, path::Path, sync::RwLock};
 
 use bytes::Bytes;
-use error_stack::Report;
 use reqwest::{Client, Response, Url};
 use thiserror::Error;
 use tokio::{
@@ -26,7 +25,7 @@ pub async fn get_response<C, V>(
     client: C,
     visited: V,
     url: Url,
-) -> Result<Option<Response>, Report<reqwest::Error>>
+) -> Result<Option<Response>, reqwest::Error>
 where
     C: Borrow<Client>,
     V: Borrow<RwLock<HashSet<Url>>>,
@@ -48,11 +47,11 @@ where
                 let mut visited_handle = visited.write().unwrap();
 
                 // Write in both urls, return None on a duplicate
-                Ok::<_, Report<_>>(visited_handle.insert(url))?;
-                Ok::<_, Report<_>>(visited_handle.insert(new_url))?;
+                Ok(visited_handle.insert(url))?;
+                Ok(visited_handle.insert(new_url))?;
             } else {
                 // Only need to write in one url, return `None` on a duplicate
-                Ok::<_, Report<_>>(visited.write().unwrap().insert(url))?;
+                Ok(visited.write().unwrap().insert(url))?;
             }
 
             Ok(Some(page_response))
@@ -63,24 +62,24 @@ where
 /// Background write failure.
 #[derive(Debug, Error)]
 pub enum WriteError {
-    #[error("Failed to create the path: {0:#?}")]
+    #[error("failed to create the path")]
     PathCreate(std::io::Error),
-    #[error("Failed to open the file for writing: {0:#?}")]
+    #[error("failed to open the file for writing")]
     FileOpen(std::io::Error),
-    #[error("Failed during write: {0:#?}")]
+    #[error("failed during write")]
     Write(std::io::Error),
 }
 
 /// Handle for a background async write task.
 ///
 /// Errors are not recoverable.
-pub type WriteHandle = JoinHandle<Result<(), Report<WriteError>>>;
+pub type WriteHandle = JoinHandle<Result<(), WriteError>>;
 
 #[derive(Debug, Error)]
 pub enum DownloadError {
-    #[error("Lost connection to the writer thread: ({0:#?})")]
+    #[error("lost connection to the writer thread")]
     LostWriter((SendError<Bytes>, WriteHandle)),
-    #[error("Failure while pulling from remote: {0:#?}")]
+    #[error("failure while pulling from remote")]
     Reqwest(reqwest::Error),
 }
 
@@ -102,10 +101,13 @@ pub enum DownloadError {
 /// # Parameters
 /// * `response`: The [`Response`] from a `GET` request.
 /// * `base_path`: The base path for all files to write into.
+///
+/// # Return
+/// * All bytes from remote and the background write handle.
 pub async fn download<P>(
     mut response: Response,
     base_path: P,
-) -> Result<(Vec<u8>, WriteHandle), Report<DownloadError>>
+) -> Result<(Vec<u8>, WriteHandle), DownloadError>
 where
     P: Borrow<Path>,
 {
@@ -117,7 +119,6 @@ where
     // Tokio's mpsc guarantees read out in the same order as write in
     let (tx, mut rx) = mpsc::unbounded_channel::<Bytes>();
     let write_thread = spawn(async move {
-        println!("Creating dest: {:#?}", dest);
         // Create parent directory
         create_dir_all(
             dest.parent()
@@ -142,7 +143,7 @@ where
     while let Some(chunk) = response.chunk().await.map_err(DownloadError::Reqwest)? {
         content.extend_from_slice(&chunk);
         if let Err(e) = tx.send(chunk) {
-            return Err(DownloadError::LostWriter((e, write_thread)).into());
+            return Err(DownloadError::LostWriter((e, write_thread)));
         }
     }
 
@@ -151,11 +152,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env::temp_dir, fs::remove_dir_all, ops::Deref, path::PathBuf, str::FromStr, sync::LazyLock,
-    };
+    use std::{str::FromStr, sync::LazyLock};
 
     use reqwest::get;
+
+    use crate::test::CleaningTemp;
 
     use super::*;
 
@@ -165,35 +166,6 @@ mod tests {
     const USER_AGENT: &str = "speciam";
     static CLIENT: LazyLock<Client> =
         LazyLock::new(|| Client::builder().user_agent(USER_AGENT).build().unwrap());
-
-    /// Temporary directory that attempts to clean itself up on [`Drop`].
-    #[derive(Debug)]
-    struct CleaningTemp(PathBuf);
-
-    impl CleaningTemp {
-        pub fn new() -> Self {
-            Self(temp_dir())
-        }
-    }
-
-    impl Deref for CleaningTemp {
-        type Target = PathBuf;
-        fn deref(&self) -> &Self::Target {
-            &self.0
-        }
-    }
-
-    impl Borrow<Path> for CleaningTemp {
-        fn borrow(&self) -> &Path {
-            self.0.borrow()
-        }
-    }
-
-    impl Drop for CleaningTemp {
-        fn drop(&mut self) {
-            let _ = remove_dir_all(&self.0);
-        }
-    }
 
     #[tokio::test]
     async fn remove_dup() {
