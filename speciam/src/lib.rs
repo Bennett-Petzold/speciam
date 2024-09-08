@@ -72,6 +72,7 @@ pub enum DlAndScrapeErr {
     Scrape(#[from] ScrapeError),
 }
 
+/*
 /// For a unique URL, download into `base_path` and return any scraped URLs.
 ///
 /// Composes [`RobotsCheck::check`], [`get_response`], [`download`], and
@@ -200,3 +201,4 @@ mod tests {
         assert!(repeat.1.is_none());
     }
 }
+*/

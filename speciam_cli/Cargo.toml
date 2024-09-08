@@ -7,12 +7,14 @@ edition = "2021"
 vendored = ["reqwest/native-tls-vendored", "async-sqlite?/bundled"]
 compression = ["reqwest/brotli", "reqwest/deflate", "reqwest/gzip", "reqwest/zstd"]
 resume = ["dep:async-sqlite"]
+tracing = ["speciam/tracing", "dep:tracing-subscriber"]
 
 [dependencies]
-async-sqlite = { version = "0.3.1", optional = true, no-default-features = true }
+async-sqlite = { version = "0.3.1", optional = true, no_default_features = true }
 clap = { version = "4.5.11", features = ["derive"] }
 error-stack = "0.5.0"
 reqwest = { version = "0.12.7", features = ["http2", "rustls-tls"] }
 speciam = { path = "../speciam" }
 thiserror = "1.0.63"
 tokio = { version = "1.40.0", features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { version = "0.3.18", optional = true, features = ["json"] }

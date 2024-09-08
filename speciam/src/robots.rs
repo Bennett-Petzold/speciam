@@ -4,6 +4,7 @@ use std::{
     fmt::Debug,
     future::Future,
     marker::PhantomData,
+    ops::Deref,
     pin::Pin,
     sync::{Arc, Mutex, RwLock},
     task::{ready, Context, Poll, Waker},
@@ -111,7 +112,7 @@ impl<C, V> RobotsCheck<C, V> {
 )]
 enum RobotsCheckFutState<'a, Parent> {
     /// Finished checking
-    Computed(Result<bool, RobotsErr>),
+    Computed(Result<RobotsCheckStatus, RobotsErr>),
     /// Use result from other instance
     AttemptCompute((&'a Parent, &'a LimitedUrl)),
     /// Queued for wakeup with Url and position
@@ -159,6 +160,38 @@ impl<Parent: Debug> Debug for RobotsCheckFutState<'_, Parent> {
     }
 }
 
+/// Encodes whether the check passed and if the robot.txt was in cache.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RobotsCheckStatus {
+    Cached(bool),
+    Added(bool),
+}
+
+impl From<RobotsCheckStatus> for bool {
+    fn from(value: RobotsCheckStatus) -> Self {
+        match value {
+            RobotsCheckStatus::Cached(x) => x,
+            RobotsCheckStatus::Added(x) => x,
+        }
+    }
+}
+
+impl Deref for RobotsCheckStatus {
+    type Target = bool;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            RobotsCheckStatus::Cached(x) => x,
+            RobotsCheckStatus::Added(x) => x,
+        }
+    }
+}
+
+impl Borrow<bool> for RobotsCheckStatus {
+    fn borrow(&self) -> &bool {
+        self
+    }
+}
+
 /// Implementor for [`RobotsCheck::check`].
 #[derive(Debug)]
 #[repr(transparent)]
@@ -173,7 +206,7 @@ where
     V: Borrow<VisitCache> + Unpin + 'a,
     P: Borrow<RobotsCheck<C, V>> + Unpin + 'a,
 {
-    type Output = Result<bool, RobotsErr>;
+    type Output = Result<RobotsCheckStatus, RobotsErr>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
@@ -181,7 +214,10 @@ where
 
             match &mut this.state {
                 RobotsCheckFutState::Computed(res) => {
-                    return Poll::Ready(std::mem::replace(res, Ok(false)));
+                    return Poll::Ready(std::mem::replace(
+                        res,
+                        Ok(RobotsCheckStatus::Cached(false)),
+                    ));
                 }
 
                 RobotsCheckFutState::Loading((parent, url, base_url, fut)) => {
@@ -198,12 +234,13 @@ where
                     wake_queue.into_iter().for_each(|waker| waker.wake());
 
                     this.state = RobotsCheckFutState::Computed(match load_res {
-                        Ok(robots_txt) => Ok(DefaultMatcher::default()
-                            .one_agent_allowed_by_robots(
+                        Ok(robots_txt) => Ok(RobotsCheckStatus::Added(
+                            DefaultMatcher::default().one_agent_allowed_by_robots(
                                 &robots_txt,
                                 &parent.user_agent,
                                 url.url().as_str(),
-                            )),
+                            ),
+                        )),
                         Err(e) => Err(e),
                     });
                 }
@@ -257,7 +294,7 @@ where
                     &parent_handle.user_agent,
                     url.url().as_str(),
                 );
-                RobotsCheckFutState::Computed(Ok(valid))
+                RobotsCheckFutState::Computed(Ok(RobotsCheckStatus::Cached(valid)))
             } else {
                 drop(robots_handle);
 
@@ -341,8 +378,14 @@ mod tests {
         ));
 
         // Resolve both correctly
-        assert!(!search_url_fut.await.unwrap());
-        assert!(about_url_fut.await.unwrap());
+        assert_eq!(
+            search_url_fut.await.unwrap(),
+            RobotsCheckStatus::Added(false)
+        );
+        assert_eq!(
+            about_url_fut.await.unwrap(),
+            RobotsCheckStatus::Cached(true)
+        );
 
         // Third one, after robots.txt is loaded, should immediately resolve
         let static_url_fut = robots.check(&static_url);
@@ -351,7 +394,10 @@ mod tests {
             RobotsCheckFutState::Computed(_)
         ));
         let static_poll = futures::poll!(static_url_fut);
-        assert!(matches!(static_poll, Poll::Ready(Ok(true))));
+        assert!(matches!(
+            static_poll,
+            Poll::Ready(Ok(RobotsCheckStatus::Cached(true)))
+        ));
 
         // Expected state is one visit, one robots entry, zero current
         // processing.
@@ -359,8 +405,8 @@ mod tests {
             robots
                 .visited
                 .inner()
-                .iter()
-                .map(|(k, _)| {
+                .keys()
+                .map(|k| {
                     let k: LimitedUrl = k.clone().into();
                     k.url().clone()
                 })
