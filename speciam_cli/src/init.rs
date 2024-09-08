@@ -9,7 +9,9 @@ use std::{
 use clap::Parser;
 use error_stack::Report;
 use reqwest::{Client, ClientBuilder, Url};
-use speciam::{CannotBeABase, DepthLimit, Domains, LimitedUrl, RobotsCheck, ZeroLengthDuration};
+use speciam::{
+    CannotBeABase, DepthLimit, Domains, LimitedUrl, RobotsCheck, VisitCache, ZeroLengthDuration,
+};
 use thiserror::Error;
 use tokio::fs::File;
 
@@ -28,7 +30,7 @@ pub enum InitErr {
 #[derive(Debug)]
 pub struct RunState {
     pub client: Arc<Client>,
-    pub visited: Arc<RwLock<HashSet<Url>>>,
+    pub visited: Arc<VisitCache>,
     pub robots: Arc<RobotsCheck>,
     pub base_path: PathBuf,
     pub domains: Domains,
@@ -43,7 +45,7 @@ impl ResolvedArgs {
                 .build()
                 .map_err(InitErr::ClientBuild)?,
         );
-        let visited: Arc<RwLock<_>> = Arc::default();
+        let visited: Arc<VisitCache> = Arc::default();
         let robots = Arc::new(RobotsCheck::new(
             client.clone(),
             visited.clone(),

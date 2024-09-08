@@ -13,7 +13,7 @@ use reqwest::{Client, StatusCode, Url};
 use robotstxt::DefaultMatcher;
 use thiserror::Error;
 
-use crate::url_base;
+use crate::{url_base, LimitedUrl, VisitCache};
 
 #[derive(Debug, Error)]
 pub enum RobotsErr {
@@ -36,32 +36,32 @@ pub enum RobotsErr {
 /// * `client`: [`Client`] to use for this operation.
 /// * `visited`: A set of already visited [`Url`]s.
 /// * `robots`: The map of base [`Url`]s to `robot.txt` bodies.
-/// * `url`: The [`Url`] to extract a base [`Url`] from.
+/// * `base_url`: The base site [`Url`] (e.g. `https://google.com`).
 pub async fn get_robots<C, V, R>(
     client: C,
     visited: V,
     robots: R,
-    url_on_site: Url,
+    base_url: Url,
 ) -> Result<String, RobotsErr>
 where
     C: Borrow<Client>,
-    V: Borrow<RwLock<HashSet<Url>>>,
+    V: Borrow<VisitCache>,
     R: Borrow<RwLock<HashMap<Url, String>>>,
 {
-    let base_url = url_base(url_on_site).ok_or(RobotsErr::InvalidUrl)?;
-    let robots_url = base_url.join("robots.txt").unwrap_or_else(|e| {
+    let robots_url = LimitedUrl::origin(base_url.join("robots.txt").unwrap_or_else(|e| {
         panic!(
-            "\"{}/robots.txt\" is unconditionally valid. Error: {e}",
+            "\"{}/robots.txt\" is unconditionally valid. Error with base url: {e}",
             base_url.as_str()
         )
-    });
+    }))
+    .map_err(|_| RobotsErr::InvalidUrl)?;
 
     {
         let robots_clone = robots_url.clone();
-        visited.borrow().write().unwrap().insert(robots_clone);
+        visited.borrow().insert(robots_clone, vec![]);
     }
 
-    let robots_txt = match client.borrow().get(robots_url.clone()).send().await {
+    let robots_txt = match client.borrow().get(robots_url.url().clone()).send().await {
         Ok(response) => response.text().await.map_err(RobotsErr::Text)?,
         // Treat no `robots.txt` as full permission.
         Err(e) if e.status() == Some(StatusCode::NOT_FOUND) => "".to_string(),
@@ -72,7 +72,7 @@ where
         .borrow()
         .write()
         .unwrap()
-        .insert(base_url, robots_txt.clone());
+        .insert(base_url.clone(), robots_txt.clone());
 
     Ok(robots_txt)
 }
@@ -85,7 +85,7 @@ where
 /// * `Robots`: The map of base [`Url`]s to `robot.txt` bodies.
 /// * `Processing`: A queue of all currently processing base urls.
 #[derive(Debug)]
-pub struct RobotsCheck<Client = Arc<reqwest::Client>, Visited = Arc<RwLock<HashSet<Url>>>> {
+pub struct RobotsCheck<Client = Arc<reqwest::Client>, Visited = Arc<VisitCache>> {
     client: Client,
     visited: Visited,
     robots: RwLock<HashMap<Url, String>>,
@@ -113,14 +113,14 @@ enum RobotsCheckFutState<'a, Parent> {
     /// Finished checking
     Computed(Result<bool, RobotsErr>),
     /// Use result from other instance
-    AttemptCompute((&'a Parent, &'a Url)),
+    AttemptCompute((&'a Parent, &'a LimitedUrl)),
     /// Queued for wakeup with Url and position
-    Queuing((&'a Parent, &'a Url, Url, Option<usize>)),
+    Queuing((&'a Parent, &'a LimitedUrl, Url, Option<usize>)),
     /// Loading from remote
     Loading(
         (
             &'a Parent,
-            &'a Url,
+            &'a LimitedUrl,
             Url,
             Pin<Box<dyn Future<Output = Result<String, RobotsErr>> + 'a>>,
         ),
@@ -170,7 +170,7 @@ pub struct RobotsCheckFut<'a, Client, Visited, Parent> {
 impl<'a, C, V, P> Future for RobotsCheckFut<'a, C, V, P>
 where
     C: Borrow<Client> + Unpin + 'a,
-    V: Borrow<RwLock<HashSet<Url>>> + Unpin + 'a,
+    V: Borrow<VisitCache> + Unpin + 'a,
     P: Borrow<RobotsCheck<C, V>> + Unpin + 'a,
 {
     type Output = Result<bool, RobotsErr>;
@@ -202,7 +202,7 @@ where
                             .one_agent_allowed_by_robots(
                                 &robots_txt,
                                 &parent.user_agent,
-                                url.as_str(),
+                                url.url().as_str(),
                             )),
                         Err(e) => Err(e),
                     });
@@ -242,19 +242,20 @@ where
 impl<'a, C, V, P> RobotsCheckFut<'a, C, V, P>
 where
     C: Borrow<Client> + 'a,
-    V: Borrow<RwLock<HashSet<Url>>> + 'a,
+    V: Borrow<VisitCache> + 'a,
     P: Borrow<RobotsCheck<C, V>> + 'a,
 {
-    pub fn new(parent: &'a P, url: &'a Url) -> Self {
+    pub fn new(parent: &'a P, url: &'a LimitedUrl) -> Self {
         let parent_handle = parent.borrow();
 
-        let state = if let Some(url_base) = url_base(url.clone()) {
+        let url_base = url.url_base();
+        let state = {
             let robots_handle = parent_handle.robots.borrow().read().unwrap();
             if let Some(robots_txt) = robots_handle.get(&url_base) {
                 let valid = DefaultMatcher::default().one_agent_allowed_by_robots(
                     robots_txt,
                     &parent_handle.user_agent,
-                    url.as_str(),
+                    url.url().as_str(),
                 );
                 RobotsCheckFutState::Computed(Ok(valid))
             } else {
@@ -278,8 +279,6 @@ where
                     ))
                 }
             }
-        } else {
-            RobotsCheckFutState::Computed(Err(RobotsErr::InvalidUrl))
         };
 
         Self {
@@ -292,13 +291,13 @@ where
 impl<C, V> RobotsCheck<C, V>
 where
     C: Borrow<Client>,
-    V: Borrow<RwLock<HashSet<Url>>>,
+    V: Borrow<VisitCache>,
 {
     /// Checks if a url is allowed by its `robots.txt`.
     ///
     /// The future resolves to [`Result<bool>`]. After the first
     /// [`Poll::Ready`], it may short-circuit to `Ok(false)`.
-    pub fn check<'a>(&'a self, url: &'a Url) -> RobotsCheckFut<'_, C, V, Self> {
+    pub fn check<'a>(&'a self, url: &'a LimitedUrl) -> RobotsCheckFut<'_, C, V, Self> {
         RobotsCheckFut::new(self, url)
     }
 }
@@ -315,11 +314,11 @@ mod tests {
     async fn parse_robots() {
         let base_url = Url::from_str(GOOGLE_HOMEPAGE).unwrap();
 
-        let search_url = base_url.join("search").unwrap();
-        let about_url = base_url.join("search/about").unwrap();
-        let static_url = base_url.join("search/static").unwrap();
+        let search_url = LimitedUrl::origin(base_url.join("search").unwrap()).unwrap();
+        let about_url = LimitedUrl::origin(base_url.join("search/about").unwrap()).unwrap();
+        let static_url = LimitedUrl::origin(base_url.join("search/static").unwrap()).unwrap();
 
-        let visited = RwLock::default();
+        let visited = VisitCache::default();
 
         let robots = RobotsCheck::new(&*CLIENT, &visited, USER_AGENT.to_string());
 
@@ -357,8 +356,16 @@ mod tests {
         // Expected state is one visit, one robots entry, zero current
         // processing.
         assert_eq!(
-            robots.visited.read().unwrap().iter().collect::<Vec<_>>(),
-            [&base_url.join("robots.txt").unwrap()]
+            robots
+                .visited
+                .inner()
+                .iter()
+                .map(|(k, _)| {
+                    let k: LimitedUrl = k.clone().into();
+                    k.url().clone()
+                })
+                .collect::<Vec<_>>(),
+            [base_url.join("robots.txt").unwrap()]
         );
         assert_eq!(
             robots
@@ -373,7 +380,7 @@ mod tests {
         assert!(robots.processing.lock().unwrap().is_empty());
 
         // Query to a different domain should require a new load
-        let yahoo_url = Url::from_str(YAHOO_HOMEPAGE).unwrap();
+        let yahoo_url = LimitedUrl::origin(Url::from_str(YAHOO_HOMEPAGE).unwrap()).unwrap();
         let mut yahoo_fut = robots.check(&yahoo_url);
         assert!(matches!(futures::poll!(&mut yahoo_fut), Poll::Pending));
         assert!(matches!(yahoo_fut.state, RobotsCheckFutState::Loading(_)));

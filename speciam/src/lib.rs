@@ -13,6 +13,9 @@ pub use download::*;
 mod domain;
 pub use domain::*;
 
+mod cache;
+pub use cache::*;
+
 #[cfg(test)]
 pub mod test;
 
@@ -81,32 +84,51 @@ pub enum DlAndScrapeErr {
 /// * `base_path`: The base path for all files to write into.
 ///
 /// # Return
-/// * Scraped urls and the background write handle.
+/// * Scraped urls and the background write handle, if any.
 pub async fn dl_and_scrape<C, V, R, P>(
     client: C,
     visited: V,
     robots: R,
     base_path: P,
-    url: Url,
-) -> Result<Option<(Vec<Url>, WriteHandle)>, DlAndScrapeErr>
+    url: LimitedUrl,
+) -> Result<(Vec<LimitedUrl>, Option<WriteHandle>), DlAndScrapeErr>
 where
     C: Borrow<Client> + Unpin,
-    V: Borrow<RwLock<HashSet<Url>>> + Unpin,
+    V: Borrow<VisitCache> + Unpin,
     R: Borrow<RobotsCheck<C, V>>,
     P: Borrow<Path>,
 {
-    if robots.borrow().check(&url).await? {
-        if let Some(response) = get_response(client, visited, url.clone()).await? {
-            let headers = response.headers().clone();
+    let visited = visited.borrow();
 
-            let (content, write_handle) = download(response, base_path).await?;
-            let scraped = scrape(url, headers, content).await?;
-            Ok(Some((scraped, write_handle)))
-        } else {
-            Ok(None)
+    if robots.borrow().check(&url).await? {
+        match visited.probe(url.clone()) {
+            VisitCacheRes::Unique => {
+                let (response, unique_urls) = get_response(client, url.url().clone()).await?;
+                let headers = response.headers().clone();
+
+                let (content, write_handle) = download(response, base_path).await?;
+                let scraped: Vec<_> = scrape(url.url(), headers, content)
+                    .await?
+                    .into_iter()
+                    .flat_map(|scrape| LimitedUrl::new(&url, scrape))
+                    .collect();
+                let ret = Ok((scraped.clone(), Some(write_handle)));
+
+                // Add unique urls to visit map
+                if let UniqueUrls::Two([_, unique]) = unique_urls {
+                    if let Ok(unique) = LimitedUrl::new(&url, unique) {
+                        visited.insert(unique, scraped.clone());
+                    }
+                }
+                visited.insert(url, scraped.clone());
+
+                ret
+            }
+            VisitCacheRes::SmallerThanCached(urls) => Ok((urls, None)),
+            VisitCacheRes::CachedNoRepeat => Ok((vec![], None)),
         }
     } else {
-        Ok(None)
+        Ok((vec![], None))
     }
 }
 
@@ -120,8 +142,9 @@ mod tests {
 
     #[tokio::test]
     async fn dl_and_scrape_invalid_url() {
-        let homepage_url = Url::from_str("https://weklrjwe.com").unwrap();
-        let visited = RwLock::default();
+        let homepage_url =
+            LimitedUrl::origin(Url::from_str("https://weklrjwe.com").unwrap()).unwrap();
+        let visited = VisitCache::default();
 
         let robots_check = RobotsCheck::new(&*CLIENT, &visited, USER_AGENT.to_string());
         assert!(dl_and_scrape(
@@ -129,7 +152,7 @@ mod tests {
             &visited,
             &robots_check,
             CleaningTemp::new(),
-            homepage_url.clone(),
+            homepage_url,
         )
         .await
         .is_err());
@@ -137,8 +160,8 @@ mod tests {
 
     #[tokio::test]
     async fn dl_and_scrape_valid_url() {
-        let homepage_url = Url::from_str(RUST_HOMEPAGE).unwrap();
-        let visited = RwLock::default();
+        let homepage_url = LimitedUrl::origin(Url::from_str(RUST_HOMEPAGE).unwrap()).unwrap();
+        let visited = VisitCache::default();
 
         let robots_check = RobotsCheck::new(&*CLIENT, &visited, USER_AGENT.to_string());
         dl_and_scrape(
@@ -150,5 +173,30 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn remove_dup() {
+        let url = LimitedUrl::origin(Url::from_str(RUST_HOMEPAGE).unwrap()).unwrap();
+        let visited = VisitCache::default();
+
+        let robots_check = RobotsCheck::new(&*CLIENT, &visited, USER_AGENT.to_string());
+        let initial = dl_and_scrape(
+            &*CLIENT,
+            &visited,
+            &robots_check,
+            CleaningTemp::new(),
+            url.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(!initial.0.is_empty());
+        assert!(initial.1.is_some());
+
+        let repeat = dl_and_scrape(&*CLIENT, &visited, &robots_check, CleaningTemp::new(), url)
+            .await
+            .unwrap();
+        assert_eq!(repeat.0, vec![]);
+        assert!(repeat.1.is_none());
     }
 }

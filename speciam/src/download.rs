@@ -1,4 +1,7 @@
-use std::{borrow::Borrow, collections::HashSet, io::ErrorKind, path::Path, sync::RwLock};
+use std::{
+    borrow::Borrow, collections::HashSet, io::ErrorKind, iter::FusedIterator, path::Path,
+    sync::RwLock,
+};
 
 use bytes::Bytes;
 use reqwest::{Client, Response, Url};
@@ -11,7 +14,56 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::add_index;
+use crate::{add_index, LimitedUrl, VisitCache};
+
+/// All unique [`Url`]s.
+#[derive(Debug, Clone)]
+pub enum UniqueUrls {
+    One(Url),
+    Two([Url; 2]),
+}
+
+/// Iterator through all unique [`Url`]s.
+#[derive(Debug)]
+pub struct UniqueUrlsIter {
+    inner: Option<UniqueUrls>,
+}
+
+impl From<UniqueUrls> for UniqueUrlsIter {
+    fn from(value: UniqueUrls) -> Self {
+        Self { inner: Some(value) }
+    }
+}
+
+impl Iterator for UniqueUrlsIter {
+    type Item = Url;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.inner.clone()? {
+            UniqueUrls::One(x) => {
+                let ret = Some(x);
+                self.inner = None;
+                ret
+            }
+            UniqueUrls::Two([x, y]) => {
+                let ret = Some(y);
+                self.inner = Some(UniqueUrls::One(x));
+                ret
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = match self.inner {
+            None => 0,
+            Some(UniqueUrls::One(_)) => 1,
+            Some(UniqueUrls::Two(_)) => 2,
+        };
+        (remaining, Some(remaining))
+    }
+}
+
+impl FusedIterator for UniqueUrlsIter {}
 
 /// Return the page response, if the URL and resolved URL are unique.
 ///
@@ -19,44 +71,21 @@ use crate::add_index;
 ///
 /// # Parameters
 /// * `client`: [`Client`] to use for this operation.
-/// * `visited`: A set of already visited [`Url`]s.
 /// * `url`: The potentially unique [`Url`] to pull.
-pub async fn get_response<C, V>(
-    client: C,
-    visited: V,
-    url: Url,
-) -> Result<Option<Response>, reqwest::Error>
+pub async fn get_response<C>(client: C, url: Url) -> Result<(Response, UniqueUrls), reqwest::Error>
 where
     C: Borrow<Client>,
-    V: Borrow<RwLock<HashSet<Url>>>,
 {
-    let visited = visited.borrow();
+    let page_response = client.borrow().get(url.clone()).send().await?;
 
-    if visited.read().unwrap().contains(&url) {
-        Ok(None)
+    // Return unique urls.
+    let new_url = add_index(&page_response);
+    let unique_urls = if url != new_url {
+        UniqueUrls::Two([url, new_url])
     } else {
-        let page_response = client.borrow().get(url.clone()).send().await?;
-
-        // Insert this url into the visited map, if not already present
-        if visited.read().unwrap().contains(page_response.url()) {
-            Ok(None)
-        } else {
-            let new_url = add_index(&page_response);
-            if url != new_url {
-                // Need to write in both urls
-                let mut visited_handle = visited.write().unwrap();
-
-                // Write in both urls, return None on a duplicate
-                Ok(visited_handle.insert(url))?;
-                Ok(visited_handle.insert(new_url))?;
-            } else {
-                // Only need to write in one url, return `None` on a duplicate
-                Ok(visited.write().unwrap().insert(url))?;
-            }
-
-            Ok(Some(page_response))
-        }
-    }
+        UniqueUrls::One(url)
+    };
+    Ok((page_response, unique_urls))
 }
 
 /// Background write failure.
@@ -159,21 +188,6 @@ mod tests {
     use crate::test::{CleaningTemp, CLIENT, GOOGLE_ROBOTS, LINUX_HOMEPAGE};
 
     use super::*;
-
-    #[tokio::test]
-    async fn remove_dup() {
-        let url = Url::from_str(GOOGLE_ROBOTS).unwrap();
-        let visited = RwLock::default();
-
-        assert!(get_response(&*CLIENT, &visited, url.clone())
-            .await
-            .unwrap()
-            .is_some());
-        assert!(get_response(&*CLIENT, &visited, url)
-            .await
-            .unwrap()
-            .is_none());
-    }
 
     #[tokio::test]
     async fn download_linux() {

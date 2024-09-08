@@ -70,6 +70,18 @@ impl LimitedUrl {
     pub fn depth(&self) -> usize {
         self.depth
     }
+
+    /// Recalculate depth against a new `parent`.
+    pub fn change_parent(&mut self, parent: &Self) -> &mut Self {
+        // Depth starts again on zero when the domain changes.
+        self.depth = if self.url_base() == parent.url_base() {
+            parent.depth.saturating_add(1)
+        } else {
+            0
+        };
+
+        self
+    }
 }
 
 #[cfg(feature = "serde")]
@@ -210,7 +222,7 @@ impl Serialize for Domains {
                 .map(|(url, limit)| (url.as_str(), limit))
                 .collect::<Vec<_>>(),
         )?;
-        state.serialize_field("jitter", &self.jitter);
+        state.serialize_field("jitter", &self.jitter)?;
         state.serialize_field("rate_period", &self.rate_period)?;
         state.end()
     }
