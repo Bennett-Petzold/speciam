@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
+use governor::{DefaultKeyedRateLimiter, Jitter, Quota, RateLimiter};
 use once_map::OnceMap;
 use thiserror::Error;
 use url::Url;
@@ -198,7 +198,10 @@ impl Domains {
             .ok_or(DomainNotMapped(url.url().clone()))?;
 
         Ok(if limit.within(url.depth()) {
-            self.rate_limiter.until_key_ready(&base_url).await;
+            let jitter = Jitter::new(Duration::ZERO, self.jitter);
+            self.rate_limiter
+                .until_key_ready_with_jitter(&base_url, jitter)
+                .await;
             true
         } else {
             false

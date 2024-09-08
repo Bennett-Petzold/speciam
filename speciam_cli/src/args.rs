@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     env::current_dir,
+    fmt::Debug,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time::Duration,
@@ -11,7 +12,7 @@ use error_stack::Report;
 use reqwest::{Client, ClientBuilder, Url};
 use speciam::{CannotBeABase, DepthLimit, LimitedUrl, RobotsCheck};
 use thiserror::Error;
-use tokio::fs::File;
+use tokio::{fs::File, task::JoinHandle};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -42,16 +43,14 @@ pub struct Args {
     no_prompt: bool,
     /// Display progress bars.
     #[arg(short, long)]
-    bar: bool,
+    bars: bool,
     /// Save logs to this file.
     #[arg(short, long)]
     write_logs: Option<PathBuf>,
-    /// Resume from session saved to this file (currently unimplemented).
+    #[cfg(feature = "resume")]
+    /// Write to/resume from session saved to this sqlite database (currently unimplemented).
     #[arg(short, long)]
     resume: Option<PathBuf>,
-    /// Write a resume session to this file (currently unimplemented).
-    #[arg(long)]
-    write_resume: Option<PathBuf>,
     /// Urls to start scraping from.
     ///
     /// The domains of all urls will be treated as primary domains unless
@@ -63,7 +62,78 @@ const DEFAULT_SECONDARY_DEPTH: usize = 5;
 const DEFAULT_DELAY: u64 = 500;
 const DEFAULT_JITTER: u64 = 1000;
 
-#[derive(Debug)]
+#[cfg(feature = "resume")]
+pub struct SqliteLogging {
+    PLACEHOLDER: tokio::sync::mpsc::UnboundedSender<()>,
+    handles: Vec<JoinHandle<Result<(), async_sqlite::Error>>>,
+}
+
+#[cfg(feature = "resume")]
+trait LoggingFn<T> {
+    fn exec<'a>(input: T) -> &'a [&'a dyn async_sqlite::rusqlite::ToSql];
+}
+
+#[cfg(feature = "resume")]
+struct LogNoOp {}
+
+#[cfg(feature = "resume")]
+impl LoggingFn<()> for LogNoOp {
+    fn exec<'a>(_input: ()) -> &'a [&'a dyn async_sqlite::rusqlite::ToSql] {
+        &[]
+    }
+}
+
+#[cfg(feature = "resume")]
+fn logging_thread<T, F>(
+    pool: async_sqlite::Pool,
+    prepared_stmt: String,
+) -> (
+    tokio::sync::mpsc::UnboundedSender<T>,
+    JoinHandle<Result<(), async_sqlite::Error>>,
+)
+where
+    F: LoggingFn<T>,
+    T: Send + 'static,
+{
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = tokio::spawn(async move {
+        // Using recv_many allows for batching writes when they're queued
+        // up between processing/yields.
+        let mut buffer = Vec::new();
+        while rx.recv_many(&mut buffer, usize::MAX).await > 0 {
+            // Clears up these lines from the buffer
+            let lines = std::mem::take(&mut buffer);
+            let prepared_stmt = prepared_stmt.clone();
+            pool.conn(move |c| {
+                let mut stmt = c.prepare_cached(&prepared_stmt)?;
+                for arg in lines {
+                    stmt.execute(F::exec(arg))?;
+                }
+                Ok(())
+            })
+            .await?;
+        }
+        Ok(())
+    });
+
+    (tx, handle)
+}
+
+#[cfg(feature = "resume")]
+impl From<async_sqlite::Pool> for SqliteLogging {
+    fn from(value: async_sqlite::Pool) -> Self {
+        let (PLACEHOLDER, PLACEHOLDER_THREAD) =
+            logging_thread::<_, LogNoOp>(value.clone(), "".to_string());
+
+        let handles = vec![PLACEHOLDER_THREAD];
+
+        Self {
+            PLACEHOLDER,
+            handles,
+        }
+    }
+}
+
 pub struct ResolvedArgs {
     pub primary_depth: DepthLimit,
     pub secondary_depth: DepthLimit,
@@ -72,9 +142,33 @@ pub struct ResolvedArgs {
     pub jitter: Duration,
     pub save_config: bool,
     pub no_prompt: bool,
-    pub bar: bool,
+    pub bars: bool,
     pub write_logs: Option<File>,
     pub start_urls: Vec<LimitedUrl>,
+    #[cfg(feature = "resume")]
+    pub resume: Option<SqliteLogging>,
+}
+
+impl Debug for ResolvedArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut fmt = f.debug_struct("ResolvedArgs");
+        let fmt = fmt
+            .field("primary_depth", &self.primary_depth)
+            .field("secondary_depth", &self.secondary_depth)
+            .field("primary_domains", &self.primary_domains)
+            .field("delay", &self.delay)
+            .field("jitter", &self.jitter)
+            .field("save_config", &self.save_config)
+            .field("no_prompt", &self.no_prompt)
+            .field("bars", &self.bars)
+            .field("write_logs", &self.write_logs)
+            .field("start_urls", &self.start_urls);
+
+        #[cfg(feature = "resume")]
+        fmt.field("resume", &self.resume.is_some());
+
+        fmt.finish()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -91,6 +185,9 @@ pub enum ResolveErr {
     InvalidPrimaryDomain(#[from] InvalidPrimaryDomain),
     #[error("failed to create a logfile")]
     NoLogFile(#[from] std::io::Error),
+    #[cfg(feature = "resume")]
+    #[error("failed to open sqlite database")]
+    Sqlite(#[from] async_sqlite::Error),
 }
 
 impl Args {
@@ -112,6 +209,21 @@ impl Args {
             .collect::<Result<Vec<_>, _>>()?;
         let primary_domains = start_urls.iter().map(LimitedUrl::url_base).collect();
 
+        #[cfg(feature = "resume")]
+        let resume = if let Some(resume) = self.resume {
+            Some(
+                async_sqlite::PoolBuilder::new()
+                    .path(resume)
+                    .journal_mode(async_sqlite::JournalMode::Wal)
+                    .open()
+                    .await
+                    .map_err(ResolveErr::Sqlite)?
+                    .into(),
+            )
+        } else {
+            None
+        };
+
         Ok(ResolvedArgs {
             primary_depth: self.primary_depth.into(),
             secondary_depth: self
@@ -123,9 +235,11 @@ impl Args {
             jitter: Duration::from_millis(self.jitter.unwrap_or(DEFAULT_JITTER)),
             save_config: self.save_config,
             no_prompt: self.no_prompt,
-            bar: self.bar,
+            bars: self.bars,
             write_logs,
             start_urls,
+            #[cfg(feature = "resume")]
+            resume,
         })
     }
 }

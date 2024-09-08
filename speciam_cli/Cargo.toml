@@ -4,10 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-vendored = ["reqwest/native-tls-vendored"]
+vendored = ["reqwest/native-tls-vendored", "async-sqlite?/bundled"]
 compression = ["reqwest/brotli", "reqwest/deflate", "reqwest/gzip", "reqwest/zstd"]
+resume = ["dep:async-sqlite"]
 
 [dependencies]
+async-sqlite = { version = "0.3.1", optional = true, no-default-features = true }
 clap = { version = "4.5.11", features = ["derive"] }
 error-stack = "0.5.0"
 reqwest = { version = "0.12.7", features = ["http2", "rustls-tls"] }
