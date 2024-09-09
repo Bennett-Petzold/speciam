@@ -3,10 +3,12 @@ use std::panic::Location;
 use clap::Parser;
 
 mod args;
+mod init;
 use args::{Args, ResolvedArgs};
 use init::RunState;
 
-mod init;
+#[cfg(feature = "resume")]
+pub mod resume;
 
 #[tokio::main]
 async fn main() {

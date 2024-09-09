@@ -51,7 +51,19 @@ impl UniqueLimitedUrl {
 /// of the same link. In that case a cache avoids repeat downloads, parses, and
 /// traversals of the same path.
 #[derive(Debug, Default)]
-pub struct VisitCache(RwLock<HashMap<UniqueLimitedUrl, Vec<LimitedUrl>>>);
+pub struct VisitCache(RwLock<HashMap<UniqueLimitedUrl, Vec<Url>>>);
+
+impl From<HashMap<UniqueLimitedUrl, Vec<Url>>> for VisitCache {
+    fn from(value: HashMap<UniqueLimitedUrl, Vec<Url>>) -> Self {
+        Self(RwLock::new(value))
+    }
+}
+
+impl FromIterator<(UniqueLimitedUrl, Vec<Url>)> for VisitCache {
+    fn from_iter<T: IntoIterator<Item = (UniqueLimitedUrl, Vec<Url>)>>(iter: T) -> Self {
+        HashMap::from_iter(iter).into()
+    }
+}
 
 /// This provides the cached urls when a re-run is appropriate.
 ///
@@ -76,14 +88,16 @@ impl VisitCache {
         let cache_handle = self.0.read().unwrap();
         if let Some((stored_url, cache_entry)) = cache_handle.get_key_value(&url) {
             if url.smaller_depth(stored_url) {
-                let mut cache_entry = cache_entry.clone();
+                // Clone and drop; avoids holding lock during processing
+                let cache_entry = cache_entry.clone();
                 drop(cache_handle);
 
-                // Update all the depths and clone
-                cache_entry.iter_mut().for_each(|entry| {
-                    entry.change_parent(&url.0);
-                });
-                let ret_cache = cache_entry.clone();
+                // Set depths appropriately
+                let ret_cache = cache_entry
+                    .clone()
+                    .into_iter()
+                    .flat_map(|entry| LimitedUrl::new(&url.0, entry))
+                    .collect();
 
                 // Checks need to be repeated, in case the entry was updated
                 // between dropping and read lock and now.
@@ -108,7 +122,7 @@ impl VisitCache {
     }
 
     /// Add `url` to the cache if unique or smaller than the current entry.
-    pub fn insert(&self, url: LimitedUrl, children: Vec<LimitedUrl>) {
+    pub fn insert(&self, url: LimitedUrl, children: Vec<Url>) {
         let url = url.into();
         let mut mut_handle = self.0.write().unwrap();
 
@@ -125,7 +139,7 @@ impl VisitCache {
         }
     }
 
-    pub fn inner(&self) -> HashMap<UniqueLimitedUrl, Vec<LimitedUrl>> {
+    pub fn inner(&self) -> HashMap<UniqueLimitedUrl, Vec<Url>> {
         (*self.0.read().unwrap()).clone()
     }
 }

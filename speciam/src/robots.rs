@@ -104,6 +104,21 @@ impl<C, V> RobotsCheck<C, V> {
             user_agent,
         }
     }
+
+    pub fn with_database(
+        client: C,
+        visited: V,
+        user_agent: String,
+        robots: HashMap<Url, String>,
+    ) -> Self {
+        Self {
+            client,
+            visited,
+            robots: RwLock::new(robots),
+            processing: Mutex::default(),
+            user_agent,
+        }
+    }
 }
 
 #[expect(

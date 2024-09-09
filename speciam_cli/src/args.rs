@@ -44,11 +44,11 @@ pub struct Args {
     /// Display progress bars.
     #[arg(short, long)]
     bars: bool,
-    /// Save logs to this file.
+    /// Save logs to this file (not currently implemented).
     #[arg(short, long)]
     write_logs: Option<PathBuf>,
     #[cfg(feature = "resume")]
-    /// Write to/resume from session saved to this sqlite database (currently unimplemented).
+    /// Write to/resume from session saved to this sqlite database.
     #[arg(short, long)]
     resume: Option<PathBuf>,
     /// Urls to start scraping from.
@@ -62,78 +62,6 @@ const DEFAULT_SECONDARY_DEPTH: usize = 5;
 const DEFAULT_DELAY: u64 = 500;
 const DEFAULT_JITTER: u64 = 1000;
 
-#[cfg(feature = "resume")]
-pub struct SqliteLogging {
-    PLACEHOLDER: tokio::sync::mpsc::UnboundedSender<()>,
-    handles: Vec<JoinHandle<Result<(), async_sqlite::Error>>>,
-}
-
-#[cfg(feature = "resume")]
-trait LoggingFn<T> {
-    fn exec<'a>(input: T) -> &'a [&'a dyn async_sqlite::rusqlite::ToSql];
-}
-
-#[cfg(feature = "resume")]
-struct LogNoOp {}
-
-#[cfg(feature = "resume")]
-impl LoggingFn<()> for LogNoOp {
-    fn exec<'a>(_input: ()) -> &'a [&'a dyn async_sqlite::rusqlite::ToSql] {
-        &[]
-    }
-}
-
-#[cfg(feature = "resume")]
-fn logging_thread<T, F>(
-    pool: async_sqlite::Pool,
-    prepared_stmt: String,
-) -> (
-    tokio::sync::mpsc::UnboundedSender<T>,
-    JoinHandle<Result<(), async_sqlite::Error>>,
-)
-where
-    F: LoggingFn<T>,
-    T: Send + 'static,
-{
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let handle = tokio::spawn(async move {
-        // Using recv_many allows for batching writes when they're queued
-        // up between processing/yields.
-        let mut buffer = Vec::new();
-        while rx.recv_many(&mut buffer, usize::MAX).await > 0 {
-            // Clears up these lines from the buffer
-            let lines = std::mem::take(&mut buffer);
-            let prepared_stmt = prepared_stmt.clone();
-            pool.conn(move |c| {
-                let mut stmt = c.prepare_cached(&prepared_stmt)?;
-                for arg in lines {
-                    stmt.execute(F::exec(arg))?;
-                }
-                Ok(())
-            })
-            .await?;
-        }
-        Ok(())
-    });
-
-    (tx, handle)
-}
-
-#[cfg(feature = "resume")]
-impl From<async_sqlite::Pool> for SqliteLogging {
-    fn from(value: async_sqlite::Pool) -> Self {
-        let (PLACEHOLDER, PLACEHOLDER_THREAD) =
-            logging_thread::<_, LogNoOp>(value.clone(), "".to_string());
-
-        let handles = vec![PLACEHOLDER_THREAD];
-
-        Self {
-            PLACEHOLDER,
-            handles,
-        }
-    }
-}
-
 pub struct ResolvedArgs {
     pub primary_depth: DepthLimit,
     pub secondary_depth: DepthLimit,
@@ -146,7 +74,7 @@ pub struct ResolvedArgs {
     pub write_logs: Option<File>,
     pub start_urls: Vec<LimitedUrl>,
     #[cfg(feature = "resume")]
-    pub resume: Option<SqliteLogging>,
+    pub resume: Option<crate::resume::SqliteLogging>,
 }
 
 impl Debug for ResolvedArgs {
@@ -187,7 +115,10 @@ pub enum ResolveErr {
     NoLogFile(#[from] std::io::Error),
     #[cfg(feature = "resume")]
     #[error("failed to open sqlite database")]
-    Sqlite(#[from] async_sqlite::Error),
+    SqliteOpen(#[source] async_sqlite::Error),
+    #[cfg(feature = "resume")]
+    #[error("failed to initialize sqlite database")]
+    SqliteInit(#[source] async_sqlite::Error),
 }
 
 impl Args {
@@ -217,8 +148,9 @@ impl Args {
                     .journal_mode(async_sqlite::JournalMode::Wal)
                     .open()
                     .await
-                    .map_err(ResolveErr::Sqlite)?
-                    .into(),
+                    .map_err(ResolveErr::SqliteOpen)?
+                    .try_into()
+                    .map_err(ResolveErr::SqliteInit)?,
             )
         } else {
             None

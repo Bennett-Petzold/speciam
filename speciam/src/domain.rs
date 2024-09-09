@@ -50,12 +50,19 @@ impl LimitedUrl {
         Ok(Self { url, depth })
     }
 
+    /// Construct a URL at some `depth`.
+    ///
+    /// `url` must be resolvable to some base [`Url`].
+    pub fn at_depth(url: Url, depth: usize) -> Result<Self, CannotBeABase> {
+        url_base(url.clone()).ok_or(CannotBeABase(url.clone()))?;
+        Ok(Self { url, depth })
+    }
+
     /// Construct an originating URL.
     ///
     /// `url` must be resolvable to some base [`Url`].
     pub fn origin(url: Url) -> Result<Self, CannotBeABase> {
-        url_base(url.clone()).ok_or(CannotBeABase(url.clone()))?;
-        Ok(Self { url, depth: 0 })
+        Self::at_depth(url, 0)
     }
 
     /// Returns the base [`Url`].

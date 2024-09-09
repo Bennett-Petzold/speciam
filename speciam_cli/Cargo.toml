@@ -18,3 +18,4 @@ speciam = { path = "../speciam" }
 thiserror = "1.0.63"
 tokio = { version = "1.40.0", features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { version = "0.3.18", optional = true, features = ["json"] }
+url = "2.5.2"
