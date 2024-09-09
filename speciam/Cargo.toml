@@ -6,6 +6,7 @@ edition = "2021"
 [features]
 serde = ["dep:serde"]
 tracing = ["dep:tracing"]
+callbacks = []
 
 [dependencies]
 reqwest = { version = "0.12", features = ["stream"] }

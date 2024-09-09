@@ -1,9 +1,11 @@
 use std::{
+    cmp::min,
     collections::HashSet,
     env::current_dir,
     fmt::Debug,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
+    thread::available_parallelism,
     time::Duration,
 };
 
@@ -47,6 +49,9 @@ pub struct Args {
     /// Save logs to this file (not currently implemented).
     #[arg(short, long)]
     write_logs: Option<PathBuf>,
+    /// Cap on concurrent downloads. Defaults to number of cores.
+    #[arg(short, long)]
+    concurrency: Option<usize>,
     #[cfg(feature = "resume")]
     /// Write to/resume from session saved to this sqlite database.
     #[arg(short, long)]
@@ -72,6 +77,7 @@ pub struct ResolvedArgs {
     pub no_prompt: bool,
     pub bars: bool,
     pub write_logs: Option<File>,
+    pub concurrency: usize,
     pub start_urls: Vec<LimitedUrl>,
     #[cfg(feature = "resume")]
     pub resume: Option<crate::resume::SqliteLogging>,
@@ -90,6 +96,7 @@ impl Debug for ResolvedArgs {
             .field("no_prompt", &self.no_prompt)
             .field("bars", &self.bars)
             .field("write_logs", &self.write_logs)
+            .field("concurrency", &self.concurrency)
             .field("start_urls", &self.start_urls);
 
         #[cfg(feature = "resume")]
@@ -169,6 +176,12 @@ impl Args {
             no_prompt: self.no_prompt,
             bars: self.bars,
             write_logs,
+            // Concurrency == 0 will spawn no threads, causing a deadlock
+            concurrency: min(
+                1,
+                self.concurrency
+                    .unwrap_or(available_parallelism().unwrap().into()),
+            ),
             start_urls,
             #[cfg(feature = "resume")]
             resume,

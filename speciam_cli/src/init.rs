@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     env::current_dir,
     path::{Path, PathBuf},
+    str::FromStr,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -48,6 +49,7 @@ pub struct RunState {
     pub pending: Vec<LimitedUrl>,
     pub base_path: Arc<PathBuf>,
     pub domains: Domains,
+    pub concurrency: usize,
     #[cfg(feature = "resume")]
     pub db: Option<crate::resume::SqliteLogging>,
 }
@@ -80,7 +82,7 @@ impl ResolvedArgs {
         let db = self.resume.take().map(Arc::new);
 
         #[cfg(feature = "resume")]
-        let (visited, robots, pending) = if let Some(db) = db {
+        let (visited, robots, mut pending) = if let Some(db) = db {
             let db_clone = db.clone();
             let visited_fut =
                 tokio::spawn(
@@ -121,7 +123,10 @@ impl ResolvedArgs {
         };
 
         #[cfg(not(feature = "resume"))]
-        let (visited, robots, pending) = { no_db() };
+        let (visited, robots, mut pending) = { no_db() };
+
+        // Always push these URLs to pending to start the process
+        pending.append(&mut self.start_urls);
 
         Ok(RunState {
             client,
@@ -130,6 +135,7 @@ impl ResolvedArgs {
             pending,
             base_path,
             domains,
+            concurrency: self.concurrency,
             #[cfg(feature = "resume")]
             db: self.resume,
         })

@@ -179,14 +179,14 @@ impl<Parent: Debug> Debug for RobotsCheckFutState<'_, Parent> {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RobotsCheckStatus {
     Cached(bool),
-    Added(bool),
+    Added((bool, String)),
 }
 
 impl From<RobotsCheckStatus> for bool {
     fn from(value: RobotsCheckStatus) -> Self {
         match value {
             RobotsCheckStatus::Cached(x) => x,
-            RobotsCheckStatus::Added(x) => x,
+            RobotsCheckStatus::Added((x, _)) => x,
         }
     }
 }
@@ -196,7 +196,7 @@ impl Deref for RobotsCheckStatus {
     fn deref(&self) -> &Self::Target {
         match self {
             RobotsCheckStatus::Cached(x) => x,
-            RobotsCheckStatus::Added(x) => x,
+            RobotsCheckStatus::Added((x, _)) => x,
         }
     }
 }
@@ -209,7 +209,6 @@ impl Borrow<bool> for RobotsCheckStatus {
 
 /// Implementor for [`RobotsCheck::check`].
 #[derive(Debug)]
-#[repr(transparent)]
 pub struct RobotsCheckFut<'a, Client, Visited, Parent> {
     state: RobotsCheckFutState<'a, Parent>,
     _phantom: (PhantomData<Client>, PhantomData<Visited>),
@@ -249,13 +248,14 @@ where
                     wake_queue.into_iter().for_each(|waker| waker.wake());
 
                     this.state = RobotsCheckFutState::Computed(match load_res {
-                        Ok(robots_txt) => Ok(RobotsCheckStatus::Added(
+                        Ok(robots_txt) => Ok(RobotsCheckStatus::Added((
                             DefaultMatcher::default().one_agent_allowed_by_robots(
                                 &robots_txt,
                                 &parent.user_agent,
                                 url.url().as_str(),
                             ),
-                        )),
+                            robots_txt,
+                        ))),
                         Err(e) => Err(e),
                     });
                 }
@@ -393,10 +393,9 @@ mod tests {
         ));
 
         // Resolve both correctly
-        assert_eq!(
-            search_url_fut.await.unwrap(),
-            RobotsCheckStatus::Added(false)
-        );
+        let search_url = search_url_fut.await.unwrap();
+        assert!(matches!(search_url, RobotsCheckStatus::Added(_)));
+        assert_eq!(*search_url, false);
         assert_eq!(
             about_url_fut.await.unwrap(),
             RobotsCheckStatus::Cached(true)

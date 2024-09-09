@@ -59,24 +59,30 @@ pub fn add_index(response: &Response) -> Url {
     url
 }
 
+/// Error that occured during download and scrape.
+///
+/// The callback error `C` is used when the `callback` feature is enabled.
 #[derive(Debug, Error)]
-pub enum DlAndScrapeErr {
+pub enum DlAndScrapeErr<C = ()> {
     /// Contains [`RobotsErr`].
     #[error("failure while checking robots.txt")]
-    RobotsCheck(#[from] RobotsErr),
+    RobotsCheck(#[source] RobotsErr),
     #[error("failure while making an initial request")]
-    GetResponse(#[from] reqwest::Error),
+    GetResponse(#[source] reqwest::Error),
     #[error("failure while downloading")]
-    Download(#[from] DownloadError),
+    Download(#[source] DownloadError),
     #[error("failure while scraping")]
-    Scrape(#[from] ScrapeError),
+    Scrape(#[source] ScrapeError),
+    #[error("logging callback failed")]
+    CB(#[source] C),
 }
 
-/*
 /// For a unique URL, download into `base_path` and return any scraped URLs.
 ///
 /// Composes [`RobotsCheck::check`], [`get_response`], [`download`], and
 /// [`scrape`] into one action.
+///
+/// Set `CbErr` to `()` if it is unused.
 ///
 /// # Parameters
 /// * `client`: [`Client`] to use for this operation.
@@ -86,13 +92,23 @@ pub enum DlAndScrapeErr {
 ///
 /// # Return
 /// * Scraped urls and the background write handle, if any.
-pub async fn dl_and_scrape<C, V, R, P>(
+pub async fn dl_and_scrape<
+    C,
+    V,
+    R,
+    P,
+    CbErr,
+    #[cfg(feature = "callbacks")] Rcb: FnOnce(Url, &String) -> Result<(), CbErr>,
+    #[cfg(feature = "callbacks")] Vcb: Fn(&LimitedUrl, Vec<Url>) -> Result<(), CbErr>,
+>(
     client: C,
     visited: V,
     robots: R,
     base_path: P,
     url: LimitedUrl,
-) -> Result<(Vec<LimitedUrl>, Option<WriteHandle>), DlAndScrapeErr>
+    #[cfg(feature = "callbacks")] new_robot_cb: Rcb,
+    #[cfg(feature = "callbacks")] new_visit_cb: Vcb,
+) -> Result<(Vec<LimitedUrl>, Option<WriteHandle>), DlAndScrapeErr<CbErr>>
 where
     C: Borrow<Client> + Unpin,
     V: Borrow<VisitCache> + Unpin,
@@ -101,31 +117,68 @@ where
 {
     let visited = visited.borrow();
 
-    if robots.borrow().check(&url).await? {
+    let robots_check_status = robots
+        .borrow()
+        .check(&url)
+        .await
+        .map_err(DlAndScrapeErr::RobotsCheck)?;
+
+    #[cfg(feature = "callbacks")]
+    {
+        if let RobotsCheckStatus::Added((_, robots_txt)) = &robots_check_status {
+            (new_robot_cb)(url.url_base(), robots_txt).map_err(DlAndScrapeErr::CB)?
+        }
+    }
+
+    if *robots_check_status {
         match visited.probe(url.clone()) {
             VisitCacheRes::Unique => {
-                let (response, unique_urls) = get_response(client, url.url().clone()).await?;
+                let (response, unique_urls) = get_response(client, url.url().clone())
+                    .await
+                    .map_err(DlAndScrapeErr::GetResponse)?;
                 let headers = response.headers().clone();
 
-                let (content, write_handle) = download(response, base_path).await?;
+                let (content, write_handle) = download(response, base_path)
+                    .await
+                    .map_err(DlAndScrapeErr::Download)?;
                 let scraped: Vec<_> = scrape(url.url(), headers, content)
-                    .await?
-                    .into_iter()
-                    .flat_map(|scrape| LimitedUrl::new(&url, scrape))
+                    .await
+                    .map_err(DlAndScrapeErr::Scrape)?;
+
+                let scraped_limited = scraped
+                    .iter()
+                    .flat_map(|scrape| LimitedUrl::new(&url, scrape.clone()))
                     .collect();
-                let ret = Ok((scraped.clone(), Some(write_handle)));
+                let ret = Ok((scraped_limited, Some(write_handle)));
 
                 // Add unique urls to visit map
                 if let UniqueUrls::Two([_, unique]) = unique_urls {
                     if let Ok(unique) = LimitedUrl::new(&url, unique) {
+                        #[cfg(feature = "callbacks")]
+                        {
+                            (new_visit_cb)(&unique, scraped.clone()).map_err(DlAndScrapeErr::CB)?;
+                        }
                         visited.insert(unique, scraped.clone());
                     }
                 }
-                visited.insert(url, scraped.clone());
+
+                #[cfg(feature = "callbacks")]
+                {
+                    (new_visit_cb)(&url, scraped.clone()).map_err(DlAndScrapeErr::CB)?;
+                }
+                visited.insert(url, scraped);
 
                 ret
             }
-            VisitCacheRes::SmallerThanCached(urls) => Ok((urls, None)),
+            VisitCacheRes::SmallerThanCached(urls) => {
+                #[cfg(feature = "callbacks")]
+                {
+                    (new_visit_cb)(&url, urls.iter().map(|x| x.url().clone()).collect())
+                        .map_err(DlAndScrapeErr::CB)?;
+                }
+
+                Ok((urls, None))
+            }
             VisitCacheRes::CachedNoRepeat => Ok((vec![], None)),
         }
     } else {
@@ -154,6 +207,10 @@ mod tests {
             &robots_check,
             CleaningTemp::new(),
             homepage_url,
+            #[cfg(feature = "callbacks")]
+            |_, _| Ok::<_, ()>(()),
+            #[cfg(feature = "callbacks")]
+            |_, _| Ok::<_, ()>(()),
         )
         .await
         .is_err());
@@ -171,6 +228,10 @@ mod tests {
             &robots_check,
             CleaningTemp::new(),
             homepage_url,
+            #[cfg(feature = "callbacks")]
+            |_, _| Ok::<_, ()>(()),
+            #[cfg(feature = "callbacks")]
+            |_, _| Ok::<_, ()>(()),
         )
         .await
         .unwrap();
@@ -188,17 +249,30 @@ mod tests {
             &robots_check,
             CleaningTemp::new(),
             url.clone(),
+            #[cfg(feature = "callbacks")]
+            |_, _| Ok::<_, ()>(()),
+            #[cfg(feature = "callbacks")]
+            |_, _| Ok::<_, ()>(()),
         )
         .await
         .unwrap();
         assert!(!initial.0.is_empty());
         assert!(initial.1.is_some());
 
-        let repeat = dl_and_scrape(&*CLIENT, &visited, &robots_check, CleaningTemp::new(), url)
-            .await
-            .unwrap();
+        let repeat = dl_and_scrape(
+            &*CLIENT,
+            &visited,
+            &robots_check,
+            CleaningTemp::new(),
+            url,
+            #[cfg(feature = "callbacks")]
+            |_, _| Ok::<_, ()>(()),
+            #[cfg(feature = "callbacks")]
+            |_, _| Ok::<_, ()>(()),
+        )
+        .await
+        .unwrap();
         assert_eq!(repeat.0, vec![]);
         assert!(repeat.1.is_none());
     }
 }
-*/
