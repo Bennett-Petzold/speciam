@@ -28,3 +28,4 @@ tracing = { version = "0.1.40", optional = true }
 tokio = { version = "*", features = ["macros", "rt-multi-thread"] }
 reqwest = { version = "*", features = ["http2", "rustls-tls"] }
 futures = "0.3.30"
+uuid = { version = "1.10.0", features = ["v4"] }

@@ -38,9 +38,7 @@ where
             // Adapted from the rust cookbook
             // <https://rustwiki.org/en/rust-cookbook/web/scraping.html>
 
-            let body = Document::from(
-                std::str::from_utf8(body.borrow()).map_err(ScrapeError::InvalidBody)?,
-            );
+            let body = Document::from(String::from_utf8_lossy(body.borrow()).as_ref());
 
             let base_url = LazyCell::new(|| url_base(url.borrow().clone()));
 

@@ -105,11 +105,21 @@ pub enum WriteError {
 pub type WriteHandle = JoinHandle<Result<(), WriteError>>;
 
 #[derive(Debug, Error)]
+#[error("lost connection to the writer thread")]
+pub struct LostWriter {
+    send_err: SendError<Bytes>,
+    #[source]
+    handle_err: WriteError,
+}
+
+#[derive(Debug, Error)]
 pub enum DownloadError {
-    #[error("lost connection to the writer thread")]
-    LostWriter((SendError<Bytes>, WriteHandle)),
+    #[error("{0:?}")]
+    LostWriter(#[source] LostWriter),
     #[error("failure while pulling from remote")]
-    Reqwest(reqwest::Error),
+    Reqwest(#[source] reqwest::Error),
+    #[error("no top-level domain for URL: {0:?}")]
+    NoDomain(Url),
 }
 
 /// Download the content of `response` into `base_path`.
@@ -142,47 +152,59 @@ where
 {
     // Strip the leading "/" from the url path and combine
     let url = add_index(&response);
-    let url_path = url.path();
-    let dest = base_path.borrow().join(&url_path[1..]);
+    if let Some(domain) = url.domain() {
+        let mut dest = base_path.borrow().join(domain);
+        if let Some(url_parts) = url.path_segments() {
+            for part in url_parts {
+                dest.push(part);
+            }
+        };
+        println!("Writing to dest: {:?}", dest);
 
-    // Tokio's mpsc guarantees read out in the same order as write in
-    let (tx, mut rx) = mpsc::unbounded_channel::<Bytes>();
-    let write_thread = spawn(async move {
-        // Create parent directory
-        create_dir_all(
-            dest.parent()
-                .ok_or(WriteError::PathCreate(ErrorKind::NotFound.into()))?,
-        )
-        .await
-        .map_err(WriteError::PathCreate)?;
+        // Tokio's mpsc guarantees read out in the same order as write in
+        let (tx, mut rx) = mpsc::unbounded_channel::<Bytes>();
+        let write_thread = spawn(async move {
+            // Create parent directory
+            let _ = create_dir_all(
+                dest.parent()
+                    .ok_or(WriteError::PathCreate(ErrorKind::NotFound.into()))?,
+            )
+            .await;
 
-        let mut dest = File::create(dest).await.map_err(WriteError::FileOpen)?;
+            let mut dest = File::create(dest).await.map_err(WriteError::FileOpen)?;
 
-        // Write out all the chunks as provided.
-        while let Some(chunk) = rx.recv().await {
-            dest.write_all(&chunk).await.map_err(WriteError::Write)?;
+            // Write out all the chunks as provided.
+            while let Some(chunk) = rx.recv().await {
+                dest.write_all(&chunk).await.map_err(WriteError::Write)?;
+            }
+            dest.flush().await.map_err(WriteError::Write)?;
+            dest.shutdown().await.map_err(WriteError::Write)?;
+            Ok(())
+        });
+
+        let mut content = Vec::new();
+
+        while let Some(chunk) = response.chunk().await.map_err(DownloadError::Reqwest)? {
+            content.extend_from_slice(&chunk);
+            if let Err(e) = tx.send(chunk) {
+                return Err(DownloadError::LostWriter(LostWriter {
+                    send_err: e,
+                    handle_err: write_thread.await.unwrap().unwrap_err(),
+                }));
+            }
         }
-        dest.flush().await.map_err(WriteError::Write)?;
-        dest.shutdown().await.map_err(WriteError::Write)?;
-        Ok(())
-    });
 
-    let mut content = Vec::new();
-
-    while let Some(chunk) = response.chunk().await.map_err(DownloadError::Reqwest)? {
-        content.extend_from_slice(&chunk);
-        if let Err(e) = tx.send(chunk) {
-            return Err(DownloadError::LostWriter((e, write_thread)));
-        }
+        Ok((content, write_thread))
+    } else {
+        Err(DownloadError::NoDomain(url))
     }
-
-    Ok((content, write_thread))
 }
 
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
 
+    use error_stack::Report;
     use reqwest::get;
 
     use crate::test::{CleaningTemp, CLIENT, GOOGLE_ROBOTS, LINUX_HOMEPAGE};

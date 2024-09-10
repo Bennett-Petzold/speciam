@@ -53,7 +53,7 @@ pub fn add_index(response: &Response) -> Url {
                     let mut mut_segments = url.path_segments_mut().unwrap_or_else(|_| {
                     panic!("The previous path_segments call returning Some(...) means this must return Ok(...).")
                 });
-                    mut_segments.pop().push(&("index".to_string() + ext));
+                    mut_segments.pop().push(&("index.".to_string() + ext));
                 }
             }
         }
@@ -148,9 +148,10 @@ where
                 // Wait for resources to free up
                 thread_limiter.mark(&url, response.version()).await;
 
-                let (content, write_handle) = download(response, base_path)
-                    .await
-                    .map_err(DlAndScrapeErr::Download)?;
+                let download_res = download(response, base_path).await;
+                thread_limiter.unmark(&url); // Free the resource
+                let (content, write_handle) = download_res.map_err(DlAndScrapeErr::Download)?;
+
                 let scraped: Vec<_> = scrape(url.url(), headers, content)
                     .await
                     .map_err(DlAndScrapeErr::Scrape)?;

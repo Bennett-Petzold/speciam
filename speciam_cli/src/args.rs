@@ -34,12 +34,6 @@ pub struct Args {
     /// Max number of extra milliseconds to delay requests.
     #[arg(short, long)]
     jitter: Option<u64>,
-    /// Load an existing configuration file.
-    #[arg(short, long)]
-    load_config: Option<PathBuf>,
-    /// Save a configuration for this run.
-    #[arg(short, long)]
-    save_config: bool,
     /// Disable interactive prompting: always assume defaults.
     #[arg(short, long)]
     no_prompt: bool,
@@ -49,13 +43,17 @@ pub struct Args {
     /// Save logs to this file (not currently implemented).
     #[arg(short, long)]
     write_logs: Option<PathBuf>,
-    /// Cap on concurrent downloads. Defaults to number of cores.
+    /// Cap on parallel downloads. Defaults to number of cores.
     #[arg(short, long)]
-    concurrency: Option<usize>,
+    units: Option<usize>,
     #[cfg(feature = "resume")]
     /// Write to/resume from session saved to this sqlite database.
     #[arg(short, long)]
     resume: Option<PathBuf>,
+    #[cfg(feature = "resume")]
+    /// Discard any non-configuration state in the sqlite database.
+    #[arg(short, long)]
+    config_only: bool,
     /// Urls to start scraping from.
     ///
     /// The domains of all urls will be treated as primary domains unless
@@ -73,14 +71,15 @@ pub struct ResolvedArgs {
     pub primary_domains: Vec<Url>,
     pub delay: Duration,
     pub jitter: Duration,
-    pub save_config: bool,
     pub no_prompt: bool,
     pub bars: bool,
     pub write_logs: Option<File>,
-    pub concurrency: usize,
+    pub units: usize,
     pub start_urls: Vec<LimitedUrl>,
     #[cfg(feature = "resume")]
     pub resume: Option<crate::resume::SqliteLogging>,
+    #[cfg(feature = "resume")]
+    pub config_only: bool,
 }
 
 impl Debug for ResolvedArgs {
@@ -92,15 +91,16 @@ impl Debug for ResolvedArgs {
             .field("primary_domains", &self.primary_domains)
             .field("delay", &self.delay)
             .field("jitter", &self.jitter)
-            .field("save_config", &self.save_config)
             .field("no_prompt", &self.no_prompt)
             .field("bars", &self.bars)
             .field("write_logs", &self.write_logs)
-            .field("concurrency", &self.concurrency)
+            .field("units", &self.units)
             .field("start_urls", &self.start_urls);
 
         #[cfg(feature = "resume")]
         fmt.field("resume", &self.resume.is_some());
+        #[cfg(feature = "resume")]
+        fmt.field("config_only", &self.config_only);
 
         fmt.finish()
     }
@@ -172,19 +172,20 @@ impl Args {
             primary_domains,
             delay: Duration::from_millis(self.delay.unwrap_or(DEFAULT_DELAY)),
             jitter: Duration::from_millis(self.jitter.unwrap_or(DEFAULT_JITTER)),
-            save_config: self.save_config,
             no_prompt: self.no_prompt,
             bars: self.bars,
             write_logs,
-            // Concurrency == 0 will spawn no threads, causing a deadlock
-            concurrency: min(
+            // Units == 0 will spawn no threads, causing a deadlock
+            units: min(
                 1,
-                self.concurrency
+                self.units
                     .unwrap_or(available_parallelism().unwrap().into()),
             ),
             start_urls,
             #[cfg(feature = "resume")]
             resume,
+            #[cfg(feature = "resume")]
+            config_only: self.config_only,
         })
     }
 }

@@ -8,6 +8,7 @@ use std::{
 };
 
 use reqwest::Client;
+use uuid::Uuid;
 
 pub const RUST_HOMEPAGE: &str = "https://www.rust-lang.org/";
 pub const GOOGLE_ROBOTS: &str = "https://www.google.com/robots.txt";
@@ -25,7 +26,7 @@ pub struct CleaningTemp(PathBuf);
 
 impl CleaningTemp {
     pub fn new() -> Self {
-        Self(temp_dir())
+        Self(temp_dir().join(Uuid::new_v4().to_string()))
     }
 }
 
