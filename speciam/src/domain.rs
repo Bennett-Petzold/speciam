@@ -144,7 +144,7 @@ impl DepthLimit {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[error("Domain of URL is not mapped in Domains. URL: {0:#?}")]
-pub struct DomainNotMapped(Url);
+pub struct DomainNotMapped(pub LimitedUrl);
 
 #[derive(Debug, Error, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[error("Duration is zero length")]
@@ -202,7 +202,7 @@ impl Domains {
         let limit = self
             .depth_limits
             .map_get(&base_url, |_, x| *x)
-            .ok_or(DomainNotMapped(url.url().clone()))?;
+            .ok_or(DomainNotMapped(url.clone()))?;
 
         Ok(if limit.within(url.depth()) {
             let jitter = Jitter::new(Duration::ZERO, self.jitter);

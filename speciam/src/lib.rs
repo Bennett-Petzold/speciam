@@ -16,6 +16,9 @@ pub use domain::*;
 mod cache;
 pub use cache::*;
 
+mod thread_limiter;
+pub use thread_limiter::*;
+
 #[cfg(test)]
 pub mod test;
 
@@ -97,6 +100,7 @@ pub async fn dl_and_scrape<
     V,
     R,
     P,
+    T,
     CbErr,
     #[cfg(feature = "callbacks")] Rcb: FnOnce(Url, &String) -> Result<(), CbErr>,
     #[cfg(feature = "callbacks")] Vcb: Fn(&LimitedUrl, Vec<Url>) -> Result<(), CbErr>,
@@ -105,6 +109,7 @@ pub async fn dl_and_scrape<
     visited: V,
     robots: R,
     base_path: P,
+    thread_limiter: T,
     url: LimitedUrl,
     #[cfg(feature = "callbacks")] new_robot_cb: Rcb,
     #[cfg(feature = "callbacks")] new_visit_cb: Vcb,
@@ -114,8 +119,10 @@ where
     V: Borrow<VisitCache> + Unpin,
     R: Borrow<RobotsCheck<C, V>>,
     P: Borrow<Path>,
+    T: Borrow<ThreadLimiter>,
 {
     let visited = visited.borrow();
+    let thread_limiter = thread_limiter.borrow();
 
     let robots_check_status = robots
         .borrow()
@@ -137,6 +144,9 @@ where
                     .await
                     .map_err(DlAndScrapeErr::GetResponse)?;
                 let headers = response.headers().clone();
+
+                // Wait for resources to free up
+                thread_limiter.mark(&url, response.version()).await;
 
                 let (content, write_handle) = download(response, base_path)
                     .await
@@ -206,6 +216,7 @@ mod tests {
             &visited,
             &robots_check,
             CleaningTemp::new(),
+            ThreadLimiter::new(usize::MAX),
             homepage_url,
             #[cfg(feature = "callbacks")]
             |_, _| Ok::<_, ()>(()),
@@ -227,6 +238,7 @@ mod tests {
             &visited,
             &robots_check,
             CleaningTemp::new(),
+            ThreadLimiter::new(usize::MAX),
             homepage_url,
             #[cfg(feature = "callbacks")]
             |_, _| Ok::<_, ()>(()),
@@ -248,6 +260,7 @@ mod tests {
             &visited,
             &robots_check,
             CleaningTemp::new(),
+            ThreadLimiter::new(usize::MAX),
             url.clone(),
             #[cfg(feature = "callbacks")]
             |_, _| Ok::<_, ()>(()),
@@ -264,6 +277,7 @@ mod tests {
             &visited,
             &robots_check,
             CleaningTemp::new(),
+            ThreadLimiter::new(usize::MAX),
             url,
             #[cfg(feature = "callbacks")]
             |_, _| Ok::<_, ()>(()),

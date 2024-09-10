@@ -138,7 +138,7 @@ enum RobotsCheckFutState<'a, Parent> {
             &'a Parent,
             &'a LimitedUrl,
             Url,
-            Pin<Box<dyn Future<Output = Result<String, RobotsErr>> + 'a>>,
+            Pin<Box<dyn Future<Output = Result<String, RobotsErr>> + Send + Sync + 'a>>,
         ),
     ),
 }
@@ -395,7 +395,7 @@ mod tests {
         // Resolve both correctly
         let search_url = search_url_fut.await.unwrap();
         assert!(matches!(search_url, RobotsCheckStatus::Added(_)));
-        assert_eq!(*search_url, false);
+        assert!(!(*search_url));
         assert_eq!(
             about_url_fut.await.unwrap(),
             RobotsCheckStatus::Cached(true)
