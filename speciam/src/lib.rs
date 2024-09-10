@@ -1,5 +1,5 @@
 mod robots;
-use std::{borrow::Borrow, collections::HashSet, path::Path, sync::RwLock};
+use std::{borrow::Borrow, path::Path};
 
 use reqwest::{header::CONTENT_TYPE, Client, Response};
 pub use robots::*;
@@ -95,6 +95,10 @@ pub enum DlAndScrapeErr<C = ()> {
 ///
 /// # Return
 /// * Scraped urls and the background write handle, if any.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "expected for the monolith lib combine"
+)]
 pub async fn dl_and_scrape<
     C,
     V,
@@ -234,7 +238,7 @@ mod tests {
         let visited = VisitCache::default();
 
         let robots_check = RobotsCheck::new(&*CLIENT, &visited, USER_AGENT.to_string());
-        dl_and_scrape(
+        let (_, handle) = dl_and_scrape(
             &*CLIENT,
             &visited,
             &robots_check,
@@ -248,6 +252,7 @@ mod tests {
         )
         .await
         .unwrap();
+        handle.unwrap().await.unwrap().unwrap();
     }
 
     #[tokio::test]

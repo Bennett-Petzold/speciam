@@ -1,30 +1,16 @@
-use std::{
-    borrow::Borrow,
-    collections::HashMap,
-    iter::repeat,
-    panic::Location,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Condvar, Mutex, RwLock,
-    },
-};
+use std::panic::Location;
 
 use clap::Parser;
 
 mod args;
 mod init;
-use args::{Args, ResolvedArgs};
+use args::Args;
 use error_stack::Report;
-use futures::{
-    select,
-    stream::{self, FuturesUnordered},
-    Stream, StreamExt,
-};
+use futures::{stream::FuturesUnordered, StreamExt};
 use init::RunState;
-use speciam::{dl_and_scrape, DlAndScrapeErr, DomainNotMapped, Domains, LimitedUrl, WriteHandle};
+use speciam::{dl_and_scrape, DlAndScrapeErr, DomainNotMapped, LimitedUrl, WriteHandle};
 use tokio::{
     spawn,
-    sync::mpsc::unbounded_channel,
     task::{spawn_blocking, JoinHandle},
 };
 use url::Url;

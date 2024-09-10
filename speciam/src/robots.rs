@@ -1,6 +1,6 @@
 use std::{
     borrow::Borrow,
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fmt::Debug,
     future::Future,
     marker::PhantomData,
@@ -14,7 +14,7 @@ use reqwest::{Client, StatusCode, Url};
 use robotstxt::DefaultMatcher;
 use thiserror::Error;
 
-use crate::{url_base, LimitedUrl, VisitCache};
+use crate::{LimitedUrl, VisitCache};
 
 #[derive(Debug, Error)]
 pub enum RobotsErr {

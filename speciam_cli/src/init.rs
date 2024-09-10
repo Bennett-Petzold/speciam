@@ -1,29 +1,13 @@
-use std::{
-    collections::HashSet,
-    env::current_dir,
-    path::{Path, PathBuf},
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
-};
+use std::{env::current_dir, path::PathBuf, sync::Arc};
 
-use clap::Parser;
 use error_stack::Report;
-use reqwest::{Client, ClientBuilder, Url};
+use reqwest::{Client, ClientBuilder};
 use speciam::{
     CannotBeABase, DepthLimit, Domains, LimitedUrl, RobotsCheck, ThreadLimiter, VisitCache,
     ZeroLengthDuration,
 };
 use thiserror::Error;
-use tokio::{
-    fs::File,
-    join,
-    sync::{
-        mpsc::{unbounded_channel, Receiver, Sender},
-        RwLock,
-    },
-    try_join,
-};
+use tokio::{sync::RwLock, try_join};
 
 use crate::args::ResolvedArgs;
 

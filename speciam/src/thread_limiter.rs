@@ -134,7 +134,7 @@ impl ThreadLimiter {
     pub fn unmark(&self, url: &LimitedUrl) {
         let base_url = url.url_base();
 
-        let free_mark = |this: &Self| {
+        let free_mark = || {
             // Always increments on add and decrements on drop
             self.parallelism.fetch_sub(1, Ordering::Release);
 
@@ -153,11 +153,11 @@ impl ThreadLimiter {
         if let Some(counter) = self.http2_domains.read().unwrap().get(&base_url) {
             let current_count = counter.fetch_sub(1, Ordering::AcqRel);
             if current_count == 1 {
-                free_mark(self)
+                free_mark()
             }
         } else {
             // Must be http/1 (or http/3, but the library doesn't support that)
-            free_mark(self)
+            free_mark()
         }
     }
 }

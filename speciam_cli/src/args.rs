@@ -1,20 +1,11 @@
-use std::{
-    cmp::min,
-    collections::HashSet,
-    env::current_dir,
-    fmt::Debug,
-    path::{Path, PathBuf},
-    sync::{Arc, RwLock},
-    thread::available_parallelism,
-    time::Duration,
-};
+use std::{cmp::min, fmt::Debug, path::PathBuf, thread::available_parallelism, time::Duration};
 
 use clap::Parser;
 use error_stack::Report;
-use reqwest::{Client, ClientBuilder, Url};
-use speciam::{CannotBeABase, DepthLimit, LimitedUrl, RobotsCheck};
+use reqwest::Url;
+use speciam::{CannotBeABase, DepthLimit, LimitedUrl};
 use thiserror::Error;
-use tokio::{fs::File, task::JoinHandle};
+use tokio::fs::File;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]

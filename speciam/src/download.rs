@@ -1,7 +1,4 @@
-use std::{
-    borrow::Borrow, collections::HashSet, io::ErrorKind, iter::FusedIterator, path::Path,
-    sync::RwLock,
-};
+use std::{borrow::Borrow, io::ErrorKind, iter::FusedIterator, path::Path};
 
 use bytes::Bytes;
 use reqwest::{Client, Response, Url};
@@ -14,7 +11,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{add_index, LimitedUrl, VisitCache};
+use crate::add_index;
 
 /// All unique [`Url`]s.
 #[derive(Debug, Clone)]
@@ -204,10 +201,9 @@ where
 mod tests {
     use std::str::FromStr;
 
-    use error_stack::Report;
     use reqwest::get;
 
-    use crate::test::{CleaningTemp, CLIENT, GOOGLE_ROBOTS, LINUX_HOMEPAGE};
+    use crate::test::{CleaningTemp, LINUX_HOMEPAGE};
 
     use super::*;
 

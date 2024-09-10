@@ -1,26 +1,17 @@
 use std::{
     borrow::Borrow,
-    collections::{HashMap, HashSet},
-    env::current_dir,
+    collections::HashMap,
     fmt::Debug,
-    future::Future,
-    path::{Path, PathBuf},
-    pin::Pin,
     str::FromStr,
-    sync::{Arc, Mutex, RwLock},
-    task::{Context, Poll},
-    time::Duration,
+    sync::{Arc, Mutex},
 };
 
-use async_sqlite::rusqlite::{Params, ToSql};
+use async_sqlite::rusqlite::Params;
 use async_sqlite::Pool;
-use clap::Parser;
-use error_stack::Report;
-use reqwest::{Client, ClientBuilder, Url};
-use speciam::{CannotBeABase, DepthLimit, LimitedUrl, RobotsCheck, UniqueLimitedUrl, VisitCache};
+use reqwest::Url;
+use speciam::{DepthLimit, LimitedUrl, UniqueLimitedUrl, VisitCache};
 use thiserror::Error;
 use tokio::{
-    fs::File,
     spawn,
     sync::mpsc::{unbounded_channel, UnboundedSender},
     task::{spawn_blocking, JoinHandle},
