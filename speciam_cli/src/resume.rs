@@ -186,7 +186,6 @@ impl TryFrom<Pool> for SqliteLogging {
         pool.conn_blocking(|conn| sqlite_retry(|| conn.execute(CREATE_VISITED, [])))?;
         pool.conn_blocking(|conn| sqlite_retry(|| conn.execute(CREATE_DOMAINS, [])))?;
         pool.conn_blocking(|conn| sqlite_retry(|| conn.execute(CREATE_PENDING, [])))?;
-        println!("PAST POOL INIT");
 
         let robots = UpdateHandle::new(pool.clone(), UPDATE_ROBOTS);
         let visited_depths = UpdateHandle::new(pool.clone(), UPDATE_VISITED_DEPTHS);

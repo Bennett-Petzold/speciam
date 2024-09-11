@@ -1,6 +1,6 @@
 use std::{
     panic::{self, Location},
-    process,
+    process::{self, exit},
     sync::Mutex,
 };
 
@@ -13,6 +13,7 @@ use args::Args;
 use error_stack::Report;
 use futures::{stream::FuturesUnordered, StreamExt};
 use init::RunState;
+use reqwest::Version;
 use speciam::{
     dl_and_scrape, DepthLimit, DlAndScrapeErr, DomainNotMapped, LimitedUrl, WriteHandle,
 };
@@ -49,7 +50,14 @@ async fn main() {
 #[derive(Debug)]
 enum ProcessReturn {
     NoOp(LimitedUrl),
-    Download((LimitedUrl, Vec<LimitedUrl>, Option<WriteHandle>)),
+    Download(
+        (
+            LimitedUrl,
+            Vec<LimitedUrl>,
+            Option<WriteHandle>,
+            Option<Version>,
+        ),
+    ),
     MappingDomain(JoinHandle<LimitedUrl>),
 }
 
@@ -101,7 +109,7 @@ fn spawn_process(
                     |_, _| Ok(()),
                 )
                 .await
-                .map(|(x, y)| ProcessReturn::Download((url.clone(), x, y)))?;
+                .map(|(x, y, z)| ProcessReturn::Download((url.clone(), x, y, z)))?;
 
                 #[cfg(feature = "resume")]
                 if !run_state.config_only {
@@ -195,9 +203,9 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
             progress.register(x);
         }
     };
-    let prog_free = |x: &LimitedUrl| {
+    let prog_free = |x: &LimitedUrl, version: Option<Version>| {
         if let Some(progress) = &run_state.progress {
-            progress.free(x);
+            progress.free(x, version);
         }
     };
 
@@ -217,10 +225,10 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
             Some(next) = handles.next() => {
                 match next.map_err(Report::new).unwrap().map_err(Report::new).unwrap() {
                     ProcessReturn::NoOp(source) => {
-                        prog_free(&source);
+                        prog_free(&source, None);
                     },
-                    ProcessReturn::Download((source, scrape, wh)) => {
-                        prog_free(&source);
+                    ProcessReturn::Download((source, scrape, wh, ver)) => {
+                        prog_free(&source, ver);
                         for url in scrape {
                             #[cfg(feature = "resume")]
                             if !run_state.config_only {
@@ -261,4 +269,6 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
             }
         }
     }
+
+    exit(0)
 }

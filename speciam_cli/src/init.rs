@@ -52,6 +52,7 @@ impl ResolvedArgs {
         let user_agent = env!("CARGO_PKG_NAME").to_string() + " " + env!("CARGO_PKG_VERSION");
         let client = Arc::new(
             ClientBuilder::new()
+                .use_rustls_tls()
                 .user_agent(&user_agent)
                 .build()
                 .map_err(InitErr::ClientBuild)?,

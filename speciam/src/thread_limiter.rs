@@ -130,7 +130,7 @@ impl ThreadLimiter {
     }
 
     /// Decrement parallelism count for `url`, if appropriate.
-    pub fn unmark(&self, url: &LimitedUrl) {
+    pub fn unmark(&self, url: &LimitedUrl, version: Version) {
         let base_url = url.url_base();
 
         let free_mark = || {
@@ -149,13 +149,17 @@ impl ThreadLimiter {
             }
         };
 
-        if let Some(counter) = self.http2_domains.read().unwrap().get(base_url) {
-            let current_count = counter.fetch_sub(1, Ordering::AcqRel);
-            if current_count == 1 {
-                free_mark()
+        if version > Version::HTTP_11 {
+            if let Some(counter) = self.http2_domains.read().unwrap().get(base_url) {
+                let current_count = counter.fetch_sub(1, Ordering::AcqRel);
+                if current_count == 1 {
+                    free_mark()
+                }
+            } else {
+                panic!("HTTP/3 not supported!");
             }
         } else {
-            // Must be http/1 (or http/3, but the library doesn't support that)
+            // Must be http/1
             free_mark()
         }
     }
@@ -328,7 +332,7 @@ mod tests {
         }
 
         // Freeing first URL should empty the queue and allow completion
-        limiter.unmark(&url);
+        limiter.unmark(&url, Version::HTTP_11);
         {
             let pending_guard = fut3.pending.lock().unwrap();
             let (keys, pending): (Vec<_>, Vec<_>) = pending_guard.iter().unzip();

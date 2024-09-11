@@ -1,7 +1,7 @@
 mod robots;
 use std::{borrow::Borrow, path::Path};
 
-use reqwest::{header::CONTENT_TYPE, Client, Response};
+use reqwest::{header::CONTENT_TYPE, Client, Response, Version};
 pub use robots::*;
 
 mod scrape;
@@ -117,7 +117,7 @@ pub async fn dl_and_scrape<
     url: LimitedUrl,
     new_robot_cb: Rcb,
     new_visit_cb: Vcb,
-) -> Result<(Vec<LimitedUrl>, Option<WriteHandle>), DlAndScrapeErr<CbErr>>
+) -> Result<(Vec<LimitedUrl>, Option<WriteHandle>, Option<Version>), DlAndScrapeErr<CbErr>>
 where
     C: Borrow<Client> + Unpin,
     V: Borrow<VisitCache> + Unpin,
@@ -146,11 +146,12 @@ where
                     .map_err(DlAndScrapeErr::GetResponse)?;
                 let headers = response.headers().clone();
 
+                let version = response.version();
                 // Wait for resources to free up
-                thread_limiter.mark(&url, response.version()).await;
+                thread_limiter.mark(&url, version).await;
 
                 let download_res = download(response, base_path).await;
-                thread_limiter.unmark(&url); // Free the resource
+                thread_limiter.unmark(&url, version); // Free the resource
                 let (content, write_handle) = download_res.map_err(DlAndScrapeErr::Download)?;
 
                 let scraped: Vec<_> = scrape(url.url(), headers, content)
@@ -161,7 +162,7 @@ where
                     .iter()
                     .flat_map(|scrape| LimitedUrl::new(&url, scrape.clone()))
                     .collect();
-                let ret = Ok((scraped_limited, Some(write_handle)));
+                let ret = Ok((scraped_limited, Some(write_handle), Some(version)));
 
                 // Add unique urls to visit map
                 if let UniqueUrls::Two([_, unique]) = unique_urls {
@@ -179,12 +180,12 @@ where
             VisitCacheRes::SmallerThanCached(urls) => {
                 (new_visit_cb)(&url, urls.iter().map(|x| x.url().clone()).collect())
                     .map_err(DlAndScrapeErr::CB)?;
-                Ok((urls, None))
+                Ok((urls, None, None))
             }
-            VisitCacheRes::CachedNoRepeat => Ok((vec![], None)),
+            VisitCacheRes::CachedNoRepeat => Ok((vec![], None, None)),
         }
     } else {
-        Ok((vec![], None))
+        Ok((vec![], None, None))
     }
 }
 
@@ -223,7 +224,7 @@ mod tests {
         let visited = VisitCache::default();
 
         let robots_check = RobotsCheck::new(&*CLIENT, &visited, USER_AGENT.to_string());
-        let (_, handle) = dl_and_scrape(
+        let (_, handle, _) = dl_and_scrape(
             &*CLIENT,
             &visited,
             &robots_check,

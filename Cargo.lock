@@ -1751,6 +1751,7 @@ dependencies = [
  "async-channel",
  "async-sqlite",
  "clap",
+ "console",
  "error-stack",
  "futures",
  "indicatif",
