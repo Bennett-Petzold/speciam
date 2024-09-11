@@ -1,17 +1,22 @@
 use std::{
     panic::{self, Location},
     process,
+    sync::{Arc, Mutex},
 };
 
 use clap::Parser;
 
 mod args;
 mod init;
+mod progress;
 use args::Args;
 use error_stack::Report;
 use futures::{stream::FuturesUnordered, StreamExt};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use init::RunState;
-use speciam::{dl_and_scrape, DlAndScrapeErr, DomainNotMapped, LimitedUrl, WriteHandle};
+use speciam::{
+    dl_and_scrape, DepthLimit, DlAndScrapeErr, DomainNotMapped, LimitedUrl, WriteHandle,
+};
 use tokio::{
     spawn,
     task::{spawn_blocking, JoinHandle},
@@ -44,8 +49,8 @@ async fn main() {
 
 #[derive(Debug)]
 enum ProcessReturn {
-    NoOp,
-    Download((Vec<LimitedUrl>, Option<WriteHandle>)),
+    NoOp(LimitedUrl),
+    Download((LimitedUrl, Vec<LimitedUrl>, Option<WriteHandle>)),
     MappingDomain(JoinHandle<LimitedUrl>),
 }
 
@@ -55,12 +60,15 @@ type CbErr = std::io::Error;
 #[cfg(feature = "resume")]
 type CbErr = async_sqlite::Error;
 
+static PROMPTING: Mutex<()> = Mutex::new(());
+
 fn spawn_process(
     url: LimitedUrl,
     run_state: RunState,
 ) -> JoinHandle<Result<ProcessReturn, DlAndScrapeErr<CbErr>>> {
     spawn(async move {
-        match run_state.domains.read().await.wait(&url).await {
+        let domains_check = { run_state.domains.read().await.wait(&url).await };
+        match domains_check {
             // Passed the depth check
             Ok(true) => {
                 let res = dl_and_scrape(
@@ -90,16 +98,16 @@ fn spawn_process(
                     },
                 )
                 .await
-                .map(|(x, y)| ProcessReturn::Download((x, y)));
+                .map(|(x, y)| ProcessReturn::Download((url.clone(), x, y)))?;
 
                 #[cfg(feature = "resume")]
-                if !run_state.config_only && res.is_ok() {
+                if !run_state.config_only {
                     if let Some(db) = &run_state.db {
                         db.drop_pending(url.url()).unwrap();
                     }
                 }
 
-                res
+                Ok(res)
             }
             // Failed the depth check
             Ok(false) => {
@@ -110,19 +118,44 @@ fn spawn_process(
                     }
                 }
 
-                Ok(ProcessReturn::NoOp)
+                Ok(ProcessReturn::NoOp(url))
             }
             // The domain needs to be initialized
             Err(DomainNotMapped(url)) => {
                 let domains = run_state.domains.clone();
                 let handle = spawn_blocking(move || {
-                    let depth = run_state.secondary_depth;
+                    let depth = if run_state.interactive {
+                        // Mutexing prevents duplicate prompting by serializing
+                        // all prompts.
+                        let prompt_handle = PROMPTING.lock().unwrap();
+                        if domains.blocking_read().has_limit(&url) {
+                            return url;
+                        };
 
-                    domains.blocking_write().add_limit(&url, depth);
+                        let depth = if let Some(progress) = &run_state.progress {
+                            // Hide progress bar during prompt
+                            progress.suspend(|| prompt_depth(&url, run_state.secondary_depth))
+                        } else {
+                            prompt_depth(&url, run_state.secondary_depth)
+                        };
+
+                        drop(prompt_handle);
+                        depth
+                    } else {
+                        run_state.secondary_depth
+                    };
+
+                    {
+                        let domains_handle = domains.blocking_write();
+                        // Avoid duplicate entries
+                        if !domains_handle.has_limit(&url) {
+                            domains_handle.add_limit(&url, run_state.secondary_depth);
+                        }
+                    }
 
                     #[cfg(feature = "resume")]
                     if let Some(db) = run_state.db {
-                        let _ = db.log_domain(url.url(), depth.into());
+                        let _ = db.log_domain(url.url_base(), depth.into());
                     }
 
                     url
@@ -133,11 +166,43 @@ fn spawn_process(
     })
 }
 
+fn prompt_depth(url: &LimitedUrl, default: DepthLimit) -> DepthLimit {
+    println!(
+        "Encountered {}, provide a depth (none for default):",
+        url.url_base()
+    );
+
+    let mut input = String::new();
+    loop {
+        std::io::stdin().read_line(&mut input).unwrap();
+        if input.trim().is_empty() {
+            return default;
+        } else if let Ok(depth) = input.parse::<usize>() {
+            return depth.into();
+        } else {
+            println!("Invalid input, try again");
+            input.clear()
+        }
+    }
+}
+
 async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
+    let prog_reg = |x: &LimitedUrl| {
+        if let Some(progress) = &run_state.progress {
+            progress.register(x);
+        }
+    };
+    let prog_free = |x: &LimitedUrl| {
+        if let Some(progress) = &run_state.progress {
+            progress.free(x);
+        }
+    };
+
     // Initialize process handles with the base urls
     let mut handles = FuturesUnordered::from_iter(
         pending
             .into_iter()
+            .inspect(prog_reg)
             .map(|x| spawn_process(x, run_state.clone())),
     );
 
@@ -148,8 +213,11 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
         tokio::select! {
             Some(next) = handles.next() => {
                 match next.map_err(Report::new).unwrap().map_err(Report::new).unwrap() {
-                    ProcessReturn::NoOp => (),
-                    ProcessReturn::Download((scrape, wh)) => {
+                    ProcessReturn::NoOp(source) => {
+                        prog_free(&source);
+                    },
+                    ProcessReturn::Download((source, scrape, wh)) => {
+                        prog_free(&source);
                         for url in scrape {
                             #[cfg(feature = "resume")]
                             if !run_state.config_only {
@@ -158,6 +226,7 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
                                 }
                             }
 
+                            prog_reg(&url);
                             handles.push(spawn_process(url, run_state.clone()));
                         }
                         if let Some(h) = wh {
@@ -179,7 +248,12 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
             // End of scraping, all queues emptied
             else => {
                 // Finished scraping
-                println!("FINISHED! STATS TODO");
+                let stats = "FINISHED! STATS TODO";
+                if let Some(progress) = &run_state.progress {
+                    progress.println(stats);
+                } else {
+                    println!("{}", stats);
+                }
                 break;
             }
         }

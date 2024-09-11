@@ -181,11 +181,12 @@ DELETE FROM pending;
 impl TryFrom<Pool> for SqliteLogging {
     type Error = async_sqlite::Error;
     fn try_from(pool: Pool) -> Result<Self, Self::Error> {
-        pool.conn_blocking(|conn| conn.execute(CREATE_ROBOTS, []))?;
-        pool.conn_blocking(|conn| conn.execute(CREATE_VISITED_DEPTHS, []))?;
-        pool.conn_blocking(|conn| conn.execute(CREATE_VISITED, []))?;
-        pool.conn_blocking(|conn| conn.execute(CREATE_DOMAINS, []))?;
-        pool.conn_blocking(|conn| conn.execute(CREATE_PENDING, []))?;
+        pool.conn_blocking(|conn| sqlite_retry(|| conn.execute(CREATE_ROBOTS, [])))?;
+        pool.conn_blocking(|conn| sqlite_retry(|| conn.execute(CREATE_VISITED_DEPTHS, [])))?;
+        pool.conn_blocking(|conn| sqlite_retry(|| conn.execute(CREATE_VISITED, [])))?;
+        pool.conn_blocking(|conn| sqlite_retry(|| conn.execute(CREATE_DOMAINS, [])))?;
+        pool.conn_blocking(|conn| sqlite_retry(|| conn.execute(CREATE_PENDING, [])))?;
+        println!("PAST POOL INIT");
 
         let robots = UpdateHandle::new(pool.clone(), UPDATE_ROBOTS);
         let visited_depths = UpdateHandle::new(pool.clone(), UPDATE_VISITED_DEPTHS);

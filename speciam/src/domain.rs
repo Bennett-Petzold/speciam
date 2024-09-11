@@ -191,6 +191,26 @@ impl Domains {
         self
     }
 
+    /// Checks if `url` has a depth limit.
+    pub fn has_limit(&self, url: &LimitedUrl) -> bool {
+        self.depth_limits.contains_key(&url.url_base())
+    }
+
+    /// Executes a callback for `url`'s domain. Does not overwrite if existing.
+    pub fn cb_limit<F>(&self, url: &LimitedUrl, limit: F) -> Option<DepthLimit>
+    where
+        F: FnOnce() -> DepthLimit,
+    {
+        if !self.depth_limits.contains_key(&url.url_base()) {
+            let limit = limit();
+            self.depth_limits
+                .map_insert(url.url_base(), |_| limit, |_, _| ());
+            Some(limit)
+        } else {
+            None
+        }
+    }
+
     /// Waits on the rate limit and returns true if within depth limit.
     ///
     /// `url`'s domain must be mapped. Use [`Self::add_limit`] or

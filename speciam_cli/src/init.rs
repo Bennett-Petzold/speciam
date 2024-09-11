@@ -1,6 +1,7 @@
 use std::{env::current_dir, path::PathBuf, sync::Arc};
 
 use error_stack::Report;
+use indicatif::MultiProgress;
 use reqwest::{Client, ClientBuilder};
 use speciam::{
     CannotBeABase, DepthLimit, Domains, LimitedUrl, RobotsCheck, ThreadLimiter, VisitCache,
@@ -9,7 +10,7 @@ use speciam::{
 use thiserror::Error;
 use tokio::{sync::RwLock, try_join};
 
-use crate::args::ResolvedArgs;
+use crate::{args::ResolvedArgs, progress::DlProgress};
 
 #[derive(Debug, Error)]
 pub enum InitErr {
@@ -40,6 +41,7 @@ pub struct RunState {
     pub thread_limiter: Arc<ThreadLimiter>,
     pub secondary_depth: DepthLimit,
     pub interactive: bool,
+    pub progress: Option<DlProgress>,
     #[cfg(feature = "resume")]
     pub db: Option<Arc<crate::resume::SqliteLogging>>,
     #[cfg(feature = "resume")]
@@ -152,6 +154,7 @@ impl ResolvedArgs {
                 thread_limiter: Arc::new(ThreadLimiter::new(self.units)),
                 secondary_depth: self.secondary_depth,
                 interactive: !self.no_prompt,
+                progress: self.bars.then_some(DlProgress::new()),
                 #[cfg(feature = "resume")]
                 db,
                 #[cfg(feature = "resume")]

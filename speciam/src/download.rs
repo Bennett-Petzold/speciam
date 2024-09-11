@@ -1,4 +1,9 @@
-use std::{borrow::Borrow, io::ErrorKind, iter::FusedIterator, path::Path};
+use std::{
+    borrow::Borrow,
+    io::ErrorKind,
+    iter::FusedIterator,
+    path::{Path, PathBuf},
+};
 
 use bytes::Bytes;
 use reqwest::{Client, Response, Url};
@@ -85,15 +90,23 @@ where
     Ok((page_response, unique_urls))
 }
 
+#[derive(Debug, Error)]
+#[error("File: {file:?}")]
+pub struct FileErr {
+    file: PathBuf,
+    #[source]
+    source: std::io::Error,
+}
+
 /// Background write failure.
 #[derive(Debug, Error)]
 pub enum WriteError {
     #[error("failed to create the path")]
-    PathCreate(std::io::Error),
+    PathCreate(#[source] FileErr),
     #[error("failed to open the file for writing")]
-    FileOpen(std::io::Error),
+    FileOpen(#[source] FileErr),
     #[error("failed during write")]
-    Write(std::io::Error),
+    Write(#[source] std::io::Error),
 }
 
 /// Handle for a background async write task.
@@ -156,19 +169,23 @@ where
                 dest.push(part);
             }
         };
-        println!("Writing to dest: {:?}", dest);
 
         // Tokio's mpsc guarantees read out in the same order as write in
         let (tx, mut rx) = mpsc::unbounded_channel::<Bytes>();
         let write_thread = spawn(async move {
             // Create parent directory
-            let _ = create_dir_all(
-                dest.parent()
-                    .ok_or(WriteError::PathCreate(ErrorKind::NotFound.into()))?,
-            )
+            let _ = create_dir_all(dest.parent().ok_or(WriteError::PathCreate(FileErr {
+                file: dest.clone(),
+                source: ErrorKind::NotFound.into(),
+            }))?)
             .await;
 
-            let mut dest = File::create(dest).await.map_err(WriteError::FileOpen)?;
+            let mut dest = File::create(&dest).await.map_err(|e| {
+                WriteError::FileOpen(FileErr {
+                    file: dest.clone(),
+                    source: e,
+                })
+            })?;
 
             // Write out all the chunks as provided.
             while let Some(chunk) = rx.recv().await {
