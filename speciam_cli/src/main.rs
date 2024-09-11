@@ -1,5 +1,6 @@
 use std::{
     panic::{self, Location},
+    path::PathBuf,
     process::{self, exit},
     sync::Mutex,
 };
@@ -208,6 +209,16 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
             progress.free(x, version);
         }
     };
+    let prog_reg_write = |x: PathBuf, predict: Option<u64>| {
+        if let Some(progress) = &run_state.progress {
+            progress.register_write(x, predict)
+        }
+    };
+    let prog_free_write = |x: PathBuf, actual_size: u64| {
+        if let Some(progress) = &run_state.progress {
+            progress.free_write(x, actual_size)
+        }
+    };
 
     // Initialize process handles with the base urls
     let mut handles = FuturesUnordered::from_iter(
@@ -241,7 +252,8 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
                             handles.push(spawn_process(url, run_state.clone()));
                         }
                         if let Some(h) = wh {
-                            write_handles.push(h);
+                            prog_reg_write(h.target, h.size_prediction);
+                            write_handles.push(h.handle);
                         }
                     }
                     ProcessReturn::MappingDomain(mapping) => {
@@ -251,7 +263,8 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
             }
             // Panic if a write fails
             Some(fin_write) = write_handles.next() => {
-                fin_write.unwrap().unwrap();
+                let (path, write_size) = fin_write.unwrap().unwrap();
+                prog_free_write(path, write_size);
             }
             Some(fin_map) = map_handles.next() => {
                 handles.push(spawn_process(fin_map.unwrap(), run_state.clone()));

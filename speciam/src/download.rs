@@ -111,8 +111,14 @@ pub enum WriteError {
 
 /// Handle for a background async write task.
 ///
+/// Also encodes predicted size (from headers) and final written progress.
 /// Errors are not recoverable.
-pub type WriteHandle = JoinHandle<Result<(), WriteError>>;
+#[derive(Debug)]
+pub struct WriteHandle {
+    pub handle: JoinHandle<Result<(PathBuf, u64), WriteError>>,
+    pub size_prediction: Option<u64>,
+    pub target: PathBuf,
+}
 
 #[derive(Debug, Error)]
 #[error("lost connection to the writer thread")]
@@ -172,7 +178,9 @@ where
 
         // Tokio's mpsc guarantees read out in the same order as write in
         let (tx, mut rx) = mpsc::unbounded_channel::<Bytes>();
+        let dest_clone = dest.clone();
         let write_thread = spawn(async move {
+            let dest = dest_clone;
             // Create parent directory
             let _ = create_dir_all(dest.parent().ok_or(WriteError::PathCreate(FileErr {
                 file: dest.clone(),
@@ -180,21 +188,31 @@ where
             }))?)
             .await;
 
-            let mut dest = File::create(&dest).await.map_err(|e| {
+            let mut dest_file = File::create(&dest).await.map_err(|e| {
                 WriteError::FileOpen(FileErr {
                     file: dest.clone(),
                     source: e,
                 })
             })?;
 
+            let mut write_counter = 0;
             // Write out all the chunks as provided.
             while let Some(chunk) = rx.recv().await {
-                dest.write_all(&chunk).await.map_err(WriteError::Write)?;
+                write_counter += chunk.len() as u64;
+                dest_file
+                    .write_all(&chunk)
+                    .await
+                    .map_err(WriteError::Write)?;
             }
-            dest.flush().await.map_err(WriteError::Write)?;
-            dest.shutdown().await.map_err(WriteError::Write)?;
-            Ok(())
+            dest_file.flush().await.map_err(WriteError::Write)?;
+            dest_file.shutdown().await.map_err(WriteError::Write)?;
+            Ok((dest, write_counter))
         });
+        let write_handle = WriteHandle {
+            handle: write_thread,
+            size_prediction: response.content_length(),
+            target: dest,
+        };
 
         let mut content = Vec::new();
 
@@ -203,12 +221,12 @@ where
             if let Err(e) = tx.send(chunk) {
                 return Err(DownloadError::LostWriter(LostWriter {
                     send_err: e,
-                    handle_err: write_thread.await.unwrap().unwrap_err(),
+                    handle_err: write_handle.handle.await.unwrap().unwrap_err(),
                 }));
             }
         }
 
-        Ok((content, write_thread))
+        Ok((content, write_handle))
     } else {
         Err(DownloadError::NoDomain(url))
     }
@@ -232,6 +250,6 @@ mod tests {
 
         let (content, write_thread) = download(homepage_response, temp_path).await.unwrap();
         assert!(!content.is_empty());
-        write_thread.await.unwrap().unwrap();
+        write_thread.handle.await.unwrap().unwrap();
     }
 }

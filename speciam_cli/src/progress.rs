@@ -1,19 +1,19 @@
 use std::{
     borrow::Borrow,
+    cmp,
     collections::HashMap,
     ops::{Deref, DerefMut},
+    path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex, RwLock,
     },
-    time::Duration,
 };
 
 use console::{Style, Term};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use reqwest::Version;
-use speciam::{Domains, LimitedUrl, ThreadLimiter};
-use tokio::{spawn, time::sleep};
+use speciam::LimitedUrl;
 
 #[derive(Debug, Clone, Copy)]
 pub enum VerOpt {
@@ -124,6 +124,7 @@ impl DerefMut for ProgBarVer {
 pub struct DlProgress {
     multi: MultiProgress,
     total: ProgressBar,
+    total_predicts: Arc<Mutex<HashMap<PathBuf, u64>>>,
     write: ProgressBar,
     count: Arc<AtomicUsize>,
     per_domain: Arc<RwLock<HashMap<String, ProgBarVer>>>,
@@ -136,6 +137,7 @@ impl Clone for DlProgress {
         Self {
             multi: self.multi.clone(),
             total: self.total.clone(),
+            total_predicts: Arc::default(),
             write: self.write.clone(),
             count: Arc::new(self.count.load(Ordering::Acquire).into()),
             per_domain: Arc::new(RwLock::new(self.per_domain.read().unwrap().clone())),
@@ -201,6 +203,7 @@ impl DlProgress {
         Self {
             multi,
             total,
+            total_predicts: Arc::default(),
             write,
             count: AtomicUsize::new(0).into(),
             per_domain,
@@ -338,6 +341,31 @@ impl DlProgress {
                 bar.bar = self.multi.add(bar.bar.clone());
                 bar.tick()
             }
+        }
+    }
+
+    pub fn register_write(&self, path: PathBuf, predict: Option<u64>) {
+        let predict = predict.unwrap_or(0);
+
+        self.total_predicts.lock().unwrap().insert(path, predict);
+        self.write.inc_length(predict);
+    }
+
+    pub fn free_write(&self, path: PathBuf, actual_size: u64) {
+        if let Some(prediction) = self.total_predicts.lock().unwrap().remove(&path) {
+            // Need to fix the write bar length
+            match actual_size.cmp(&prediction) {
+                cmp::Ordering::Less => {
+                    self.write
+                        .set_length(self.write.length().unwrap_or(0) - (prediction - actual_size));
+                }
+                cmp::Ordering::Greater => {
+                    self.write.inc_length(actual_size - prediction);
+                }
+                cmp::Ordering::Equal => (),
+            }
+
+            self.write.inc(actual_size);
         }
     }
 }

@@ -236,7 +236,7 @@ mod tests {
         )
         .await
         .unwrap();
-        handle.unwrap().await.unwrap().unwrap();
+        handle.unwrap().handle.await.unwrap().unwrap();
     }
 
     #[tokio::test]

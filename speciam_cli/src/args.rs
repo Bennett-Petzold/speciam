@@ -52,7 +52,7 @@ pub struct Args {
     start_urls: Vec<Url>,
 }
 
-const DEFAULT_SECONDARY_DEPTH: usize = 5;
+const DEFAULT_SECONDARY_DEPTH: usize = 1;
 const DEFAULT_DELAY: u64 = 500;
 const DEFAULT_JITTER: u64 = 1000;
 
