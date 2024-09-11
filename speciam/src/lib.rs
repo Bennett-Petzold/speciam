@@ -106,8 +106,8 @@ pub async fn dl_and_scrape<
     P,
     T,
     CbErr,
-    #[cfg(feature = "callbacks")] Rcb: FnOnce(Url, &String) -> Result<(), CbErr>,
-    #[cfg(feature = "callbacks")] Vcb: Fn(&LimitedUrl, Vec<Url>) -> Result<(), CbErr>,
+    Rcb: FnOnce(&str, &String) -> Result<(), CbErr>,
+    Vcb: Fn(&LimitedUrl, Vec<Url>) -> Result<(), CbErr>,
 >(
     client: C,
     visited: V,
@@ -115,8 +115,8 @@ pub async fn dl_and_scrape<
     base_path: P,
     thread_limiter: T,
     url: LimitedUrl,
-    #[cfg(feature = "callbacks")] new_robot_cb: Rcb,
-    #[cfg(feature = "callbacks")] new_visit_cb: Vcb,
+    new_robot_cb: Rcb,
+    new_visit_cb: Vcb,
 ) -> Result<(Vec<LimitedUrl>, Option<WriteHandle>), DlAndScrapeErr<CbErr>>
 where
     C: Borrow<Client> + Unpin,
@@ -134,11 +134,8 @@ where
         .await
         .map_err(DlAndScrapeErr::RobotsCheck)?;
 
-    #[cfg(feature = "callbacks")]
-    {
-        if let RobotsCheckStatus::Added((_, robots_txt)) = &robots_check_status {
-            (new_robot_cb)(url.url_base(), robots_txt).map_err(DlAndScrapeErr::CB)?
-        }
+    if let RobotsCheckStatus::Added((_, robots_txt)) = &robots_check_status {
+        (new_robot_cb)(url.url_base(), robots_txt).map_err(DlAndScrapeErr::CB)?
     }
 
     if *robots_check_status {
@@ -169,29 +166,19 @@ where
                 // Add unique urls to visit map
                 if let UniqueUrls::Two([_, unique]) = unique_urls {
                     if let Ok(unique) = LimitedUrl::new(&url, unique) {
-                        #[cfg(feature = "callbacks")]
-                        {
-                            (new_visit_cb)(&unique, scraped.clone()).map_err(DlAndScrapeErr::CB)?;
-                        }
+                        (new_visit_cb)(&unique, scraped.clone()).map_err(DlAndScrapeErr::CB)?;
                         visited.insert(unique, scraped.clone());
                     }
                 }
 
-                #[cfg(feature = "callbacks")]
-                {
-                    (new_visit_cb)(&url, scraped.clone()).map_err(DlAndScrapeErr::CB)?;
-                }
+                (new_visit_cb)(&url, scraped.clone()).map_err(DlAndScrapeErr::CB)?;
                 visited.insert(url, scraped);
 
                 ret
             }
             VisitCacheRes::SmallerThanCached(urls) => {
-                #[cfg(feature = "callbacks")]
-                {
-                    (new_visit_cb)(&url, urls.iter().map(|x| x.url().clone()).collect())
-                        .map_err(DlAndScrapeErr::CB)?;
-                }
-
+                (new_visit_cb)(&url, urls.iter().map(|x| x.url().clone()).collect())
+                    .map_err(DlAndScrapeErr::CB)?;
                 Ok((urls, None))
             }
             VisitCacheRes::CachedNoRepeat => Ok((vec![], None)),
@@ -223,9 +210,7 @@ mod tests {
             CleaningTemp::new(),
             ThreadLimiter::new(usize::MAX),
             homepage_url,
-            #[cfg(feature = "callbacks")]
             |_, _| Ok::<_, ()>(()),
-            #[cfg(feature = "callbacks")]
             |_, _| Ok::<_, ()>(()),
         )
         .await
@@ -245,9 +230,7 @@ mod tests {
             CleaningTemp::new(),
             ThreadLimiter::new(usize::MAX),
             homepage_url,
-            #[cfg(feature = "callbacks")]
             |_, _| Ok::<_, ()>(()),
-            #[cfg(feature = "callbacks")]
             |_, _| Ok::<_, ()>(()),
         )
         .await
@@ -268,9 +251,7 @@ mod tests {
             CleaningTemp::new(),
             ThreadLimiter::new(usize::MAX),
             url.clone(),
-            #[cfg(feature = "callbacks")]
             |_, _| Ok::<_, ()>(()),
-            #[cfg(feature = "callbacks")]
             |_, _| Ok::<_, ()>(()),
         )
         .await
@@ -285,9 +266,7 @@ mod tests {
             CleaningTemp::new(),
             ThreadLimiter::new(usize::MAX),
             url,
-            #[cfg(feature = "callbacks")]
             |_, _| Ok::<_, ()>(()),
-            #[cfg(feature = "callbacks")]
             |_, _| Ok::<_, ()>(()),
         )
         .await

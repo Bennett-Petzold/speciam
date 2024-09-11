@@ -36,9 +36,9 @@ pub struct CannotBeABase(Url);
 impl LimitedUrl {
     /// Construct and calculate depth based on `parent`.
     ///
-    /// `url` must be resolvable to some base [`Url`].
+    /// `url` must be resolvable to a domain.
     pub fn new(parent: &Self, url: Url) -> Result<Self, CannotBeABase> {
-        let base_url = url_base(url.clone()).ok_or(CannotBeABase(url.clone()))?;
+        let base_url = url.domain().ok_or(CannotBeABase(url.clone()))?;
 
         // Depth starts again on zero when the domain changes.
         let depth = if base_url == parent.url_base() {
@@ -52,9 +52,9 @@ impl LimitedUrl {
 
     /// Construct a URL at some `depth`.
     ///
-    /// `url` must be resolvable to some base [`Url`].
+    /// `url` must be resolvable to some domain.
     pub fn at_depth(url: Url, depth: usize) -> Result<Self, CannotBeABase> {
-        url_base(url.clone()).ok_or(CannotBeABase(url.clone()))?;
+        url.domain().ok_or(CannotBeABase(url.clone()))?;
         Ok(Self { url, depth })
     }
 
@@ -66,12 +66,16 @@ impl LimitedUrl {
     }
 
     /// Returns the base [`Url`].
-    pub fn url_base(&self) -> Url {
-        url_base(self.url.clone()).unwrap_or_else(|| panic!("Construction requires that the URL can be converted to a base URL. Failing url: {:#?}", self.url))
+    pub fn url_base(&self) -> &str {
+        self.url.domain().unwrap_or_else(|| panic!("Construction requires that the URL can be converted to a domain. Failing url: {:#?}", self.url))
     }
 
     pub fn url(&self) -> &Url {
         &self.url
+    }
+
+    pub fn stripped(&self) -> Url {
+        url_base(self.url.clone()).unwrap()
     }
 
     pub fn depth(&self) -> usize {
@@ -154,8 +158,8 @@ pub struct ZeroLengthDuration {}
 #[derive(Debug)]
 pub struct Domains {
     /// All URLs share the same rate limit.
-    rate_limiter: DefaultKeyedRateLimiter<Url>,
-    depth_limits: OnceMap<Url, DepthLimit>,
+    rate_limiter: DefaultKeyedRateLimiter<String>,
+    depth_limits: OnceMap<String, DepthLimit>,
     jitter: Duration,
     /// Work around for rate_limiter not [`Deserialize`]-ing.
     #[cfg(feature = "serde")]
@@ -177,23 +181,24 @@ impl Domains {
     /// Adds or replaces the limit for `url`'s domain.
     pub fn replace_limit(&mut self, url: &LimitedUrl, limit: DepthLimit) -> &mut Self {
         let domain = url.url_base();
-        if self.depth_limits.contains_key(&domain) {
-            self.depth_limits.remove(&domain);
+        if self.depth_limits.contains_key(domain) {
+            self.depth_limits.remove(domain);
         };
-        self.depth_limits.map_insert(domain, |_| limit, |_, _| ());
+        self.depth_limits
+            .map_insert(domain.to_string(), |_| limit, |_, _| ());
         self
     }
 
     /// Adds the limit for `url`'s domain. Does not overwrite if existing.
     pub fn add_limit(&self, url: &LimitedUrl, limit: DepthLimit) -> &Self {
         self.depth_limits
-            .map_insert(url.url_base(), |_| limit, |_, _| ());
+            .map_insert(url.url_base().to_string(), |_| limit, |_, _| ());
         self
     }
 
     /// Checks if `url` has a depth limit.
     pub fn has_limit(&self, url: &LimitedUrl) -> bool {
-        self.depth_limits.contains_key(&url.url_base())
+        self.depth_limits.contains_key(url.url_base())
     }
 
     /// Executes a callback for `url`'s domain. Does not overwrite if existing.
@@ -201,10 +206,10 @@ impl Domains {
     where
         F: FnOnce() -> DepthLimit,
     {
-        if !self.depth_limits.contains_key(&url.url_base()) {
+        if !self.depth_limits.contains_key(url.url_base()) {
             let limit = limit();
             self.depth_limits
-                .map_insert(url.url_base(), |_| limit, |_, _| ());
+                .map_insert(url.url_base().to_string(), |_| limit, |_, _| ());
             Some(limit)
         } else {
             None
@@ -221,13 +226,13 @@ impl Domains {
         let base_url = url.url_base();
         let limit = self
             .depth_limits
-            .map_get(&base_url, |_, x| *x)
+            .map_get(base_url, |_, x| *x)
             .ok_or(DomainNotMapped(url.clone()))?;
 
         Ok(if limit.within(url.depth()) {
             let jitter = Jitter::new(Duration::ZERO, self.jitter);
             self.rate_limiter
-                .until_key_ready_with_jitter(&base_url, jitter)
+                .until_key_ready_with_jitter(&base_url.to_string(), jitter)
                 .await;
             true
         } else {
@@ -393,6 +398,7 @@ impl<'de> Deserialize<'de> for Domains {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
     use std::task::Poll;
 
     use futures::poll;

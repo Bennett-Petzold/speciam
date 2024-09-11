@@ -10,24 +10,23 @@ use std::{
 };
 
 use reqwest::Version;
-use url::Url;
 
 use crate::LimitedUrl;
 
 #[derive(Debug)]
 pub struct ThreadLimiter {
-    http2_domains: RwLock<HashMap<Url, AtomicUsize>>,
+    http2_domains: RwLock<HashMap<String, AtomicUsize>>,
     limit: usize,
     parallelism: AtomicUsize,
-    pending: Mutex<HashMap<Url, Vec<Waker>>>,
+    pending: Mutex<HashMap<String, Vec<Waker>>>,
 }
 
 /// Waits until parallelism is available for this domain.
 #[derive(Debug)]
 pub struct MarkFut<'a> {
-    http2_domains: Option<&'a RwLock<HashMap<Url, AtomicUsize>>>,
-    pending: &'a Mutex<HashMap<Url, Vec<Waker>>>,
-    url: Url,
+    http2_domains: Option<&'a RwLock<HashMap<String, AtomicUsize>>>,
+    pending: &'a Mutex<HashMap<String, Vec<Waker>>>,
+    url: &'a str,
     limit: usize,
     parallelism: &'a AtomicUsize,
     pos: Option<usize>,
@@ -40,7 +39,7 @@ impl Future for MarkFut<'_> {
         let this = self.get_mut();
 
         if let Some(http2_domains) = this.http2_domains {
-            if let Some(in_flight) = http2_domains.read().unwrap().get(&this.url) {
+            if let Some(in_flight) = http2_domains.read().unwrap().get(this.url) {
                 if in_flight.load(Ordering::Acquire) > 0 {
                     in_flight.fetch_add(1, Ordering::Release);
                     return Poll::Ready(());
@@ -51,7 +50,7 @@ impl Future for MarkFut<'_> {
         if this.parallelism.load(Ordering::Acquire) < this.limit {
             if let Some(http2_domains) = this.http2_domains {
                 let domains_handle = http2_domains.read().unwrap();
-                if let Some(counter) = domains_handle.get(&this.url) {
+                if let Some(counter) = domains_handle.get(this.url) {
                     // Add to parallelism if reviving an empty counter
                     if counter.fetch_add(1, Ordering::AcqRel) == 0 {
                         this.parallelism.fetch_add(1, Ordering::Release);
@@ -60,14 +59,14 @@ impl Future for MarkFut<'_> {
                     drop(domains_handle);
                     // Re-check in case of update after dropping read handle.
                     let mut domain_handle = http2_domains.write().unwrap();
-                    if let Some(counter) = domain_handle.get(&this.url) {
+                    if let Some(counter) = domain_handle.get(this.url) {
                         // Add to parallelism if reviving an empty counter
                         if counter.fetch_add(1, Ordering::AcqRel) == 0 {
                             this.parallelism.fetch_add(1, Ordering::Release);
                         }
                     } else {
                         // Add in new domain entry and add to parallelism
-                        domain_handle.insert(this.url.clone(), AtomicUsize::new(1));
+                        domain_handle.insert(this.url.to_string(), AtomicUsize::new(1));
                         this.parallelism.fetch_add(1, Ordering::Release);
                     }
                 }
@@ -80,7 +79,7 @@ impl Future for MarkFut<'_> {
         } else {
             // Update queue entries
             let mut pending = this.pending.lock().unwrap();
-            match (this.pos, pending.get_mut(&this.url)) {
+            match (this.pos, pending.get_mut(this.url)) {
                 (Some(x), Some(queue)) if queue.len() > x => {
                     Waker::clone_from(&mut queue[x], cx.waker())
                 }
@@ -89,7 +88,7 @@ impl Future for MarkFut<'_> {
                     queue.push(cx.waker().clone());
                 }
                 (Some(_), None) | (None, None) => {
-                    pending.insert(this.url.clone(), vec![cx.waker().clone()]);
+                    pending.insert(this.url.to_string(), vec![cx.waker().clone()]);
                     this.pos = Some(0);
                 }
             }
@@ -114,7 +113,7 @@ impl ThreadLimiter {
 
     /// Create a future that resolves when there is enough parallelism for this
     /// url.
-    pub fn mark(&self, url: &LimitedUrl, version: Version) -> MarkFut<'_> {
+    pub fn mark<'a>(&'a self, url: &'a LimitedUrl, version: Version) -> MarkFut<'a> {
         let http2_domains = if version > Version::HTTP_11 {
             Some(&self.http2_domains)
         } else {
@@ -150,7 +149,7 @@ impl ThreadLimiter {
             }
         };
 
-        if let Some(counter) = self.http2_domains.read().unwrap().get(&base_url) {
+        if let Some(counter) = self.http2_domains.read().unwrap().get(base_url) {
             let current_count = counter.fetch_sub(1, Ordering::AcqRel);
             if current_count == 1 {
                 free_mark()
@@ -167,6 +166,7 @@ mod tests {
     use std::str::FromStr;
 
     use futures::poll;
+    use url::Url;
 
     use crate::test::{GOOGLE_HOMEPAGE, RUST_HOMEPAGE};
 
@@ -246,7 +246,7 @@ mod tests {
         {
             let pending_guard = fut.pending.lock().unwrap();
             let (keys, pending): (Vec<_>, Vec<_>) = pending_guard.iter().unzip();
-            assert_eq!(keys, Vec::<&Url>::new());
+            assert_eq!(keys, Vec::<&String>::new());
             assert_eq!(pending.len(), 0);
         }
 
@@ -256,7 +256,7 @@ mod tests {
         {
             let pending_guard = fut2.pending.lock().unwrap();
             let (keys, pending): (Vec<_>, Vec<_>) = pending_guard.iter().unzip();
-            assert_eq!(keys, Vec::<&Url>::new());
+            assert_eq!(keys, Vec::<&String>::new());
             assert_eq!(pending.len(), 0);
         }
 
@@ -284,7 +284,7 @@ mod tests {
         {
             let pending_guard = fut.pending.lock().unwrap();
             let (keys, pending): (Vec<_>, Vec<_>) = pending_guard.iter().unzip();
-            assert_eq!(keys, Vec::<&Url>::new());
+            assert_eq!(keys, Vec::<&String>::new());
             assert_eq!(pending.len(), 0);
         }
 
@@ -311,7 +311,7 @@ mod tests {
         {
             let pending_guard = fut.pending.lock().unwrap();
             let (keys, pending): (Vec<_>, Vec<_>) = pending_guard.iter().unzip();
-            assert_eq!(keys, Vec::<&Url>::new());
+            assert_eq!(keys, Vec::<&String>::new());
             assert_eq!(pending.len(), 0);
         }
 

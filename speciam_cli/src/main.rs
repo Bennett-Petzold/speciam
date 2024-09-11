@@ -1,7 +1,7 @@
 use std::{
     panic::{self, Location},
     process,
-    sync::{Arc, Mutex},
+    sync::Mutex,
 };
 
 use clap::Parser;
@@ -12,7 +12,6 @@ mod progress;
 use args::Args;
 use error_stack::Report;
 use futures::{stream::FuturesUnordered, StreamExt};
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use init::RunState;
 use speciam::{
     dl_and_scrape, DepthLimit, DlAndScrapeErr, DomainNotMapped, LimitedUrl, WriteHandle,
@@ -79,14 +78,16 @@ fn spawn_process(
                     run_state.thread_limiter,
                     url.clone(),
                     #[cfg(feature = "resume")]
-                    |url: Url, body: &String| {
+                    |url: &str, body: &String| {
                         if !run_state.config_only {
                             if let Some(db) = run_state.db.clone() {
-                                db.log_robots(&url, body.as_str())?;
+                                db.log_robots(url, body.as_str())?;
                             }
                         }
                         Ok::<_, async_sqlite::Error>(())
                     },
+                    #[cfg(not(feature = "resume"))]
+                    |_, _| Ok(()),
                     #[cfg(feature = "resume")]
                     |parent: &LimitedUrl, children: Vec<Url>| {
                         if !run_state.config_only {
@@ -96,6 +97,8 @@ fn spawn_process(
                         }
                         Ok(())
                     },
+                    #[cfg(not(feature = "resume"))]
+                    |_, _| Ok(()),
                 )
                 .await
                 .map(|(x, y)| ProcessReturn::Download((url.clone(), x, y)))?;

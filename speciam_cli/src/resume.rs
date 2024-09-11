@@ -212,7 +212,7 @@ impl TryFrom<Pool> for SqliteLogging {
 // Mid-execution log adjustments
 impl SqliteLogging {
     /// Log a new `robots.txt` entry.
-    pub fn log_robots<U: Borrow<Url>, S: Borrow<str>>(
+    pub fn log_robots<U: Borrow<str>, S: Borrow<str>>(
         &self,
         url: U,
         body: S,
@@ -246,7 +246,7 @@ impl SqliteLogging {
     }
 
     /// Log a new domain depth limit.
-    pub fn log_domain<U: Borrow<Url>>(
+    pub fn log_domain<U: Borrow<str>>(
         &self,
         url: U,
         depth: Option<usize>,
@@ -307,7 +307,7 @@ pub enum LimitRecoveryErr {
 // Recovering existing logs
 impl SqliteLogging {
     /// Return any parsed `robots.txt` from a previous run.
-    pub async fn restore_robots(&self) -> Result<HashMap<Url, String>, GenRecoveryErr> {
+    pub async fn restore_robots(&self) -> Result<HashMap<String, String>, GenRecoveryErr> {
         let lines: Vec<(String, String)> = self
             .pool
             .conn(|conn| {
@@ -316,14 +316,7 @@ impl SqliteLogging {
                     .collect()
             })
             .await?;
-        spawn_blocking(|| {
-            lines
-                .into_iter()
-                .map(|(url, body)| Ok((Url::from_str(&url)?, body)))
-                .collect()
-        })
-        .await
-        .unwrap()
+        Ok(lines.into_iter().collect())
     }
 
     /// Return any visited mappings from a previous run.

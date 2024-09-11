@@ -59,7 +59,7 @@ const DEFAULT_JITTER: u64 = 1000;
 pub struct ResolvedArgs {
     pub primary_depth: DepthLimit,
     pub secondary_depth: DepthLimit,
-    pub primary_domains: Vec<Url>,
+    pub primary_domains: Vec<String>,
     pub delay: Duration,
     pub jitter: Duration,
     pub no_prompt: bool,
@@ -136,7 +136,10 @@ impl Args {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let primary_domains = start_urls.iter().map(LimitedUrl::url_base).collect();
+        let primary_domains = start_urls
+            .iter()
+            .map(|x| LimitedUrl::url_base(x).to_string())
+            .collect();
 
         #[cfg(feature = "resume")]
         let resume = if let Some(resume) = self.resume {

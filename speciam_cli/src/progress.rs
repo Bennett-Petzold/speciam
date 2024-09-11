@@ -9,14 +9,12 @@ use std::{
 
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use speciam::LimitedUrl;
-use url::Url;
-
 #[derive(Debug, Clone)]
 pub struct DlProgress {
     multi: MultiProgress,
     total: ProgressBar,
     count: Arc<AtomicUsize>,
-    per_domain: Arc<RwLock<HashMap<Url, ProgressBar>>>,
+    per_domain: Arc<RwLock<HashMap<String, ProgressBar>>>,
 }
 
 // To fit within 24/25 lines nicely.
@@ -70,7 +68,7 @@ impl DlProgress {
         let base = url.borrow().url_base();
         let read_handle = self.per_domain.read().unwrap();
 
-        if let Some(bar) = read_handle.get(&base) {
+        if let Some(bar) = read_handle.get(base) {
             bar.inc_length(1);
 
             // Un-hide a hidden bar, if there's space for it.
@@ -83,7 +81,7 @@ impl DlProgress {
                     empty_bar.set_draw_target(ProgressDrawTarget::hidden());
 
                     // Make bar visible again
-                    let bar = write_handle.get_mut(&base).unwrap();
+                    let bar = write_handle.get_mut(base).unwrap();
                     *bar = self.multi.add(bar.clone());
                 }
             }
@@ -102,7 +100,7 @@ impl DlProgress {
             );
 
             let mut write_handle = self.per_domain.write().unwrap();
-            if let Some(bar) = write_handle.get(&base) {
+            if let Some(bar) = write_handle.get(base) {
                 bar.inc_length(1);
             } else {
                 if self.count.load(Ordering::Acquire) > DOMAIN_LINE_LIMIT {
@@ -120,7 +118,7 @@ impl DlProgress {
 
                 let bar = self.multi.add(bar);
                 bar.tick();
-                write_handle.insert(base, bar);
+                write_handle.insert(base.to_string(), bar);
             }
         };
     }
@@ -130,7 +128,7 @@ impl DlProgress {
 
         let base = url.borrow().url_base();
         let read_handle = self.per_domain.read().unwrap();
-        let bar = read_handle.get(&base).unwrap();
+        let bar = read_handle.get(base).unwrap();
         bar.inc(1);
 
         // Un-hide a bar, if possible
@@ -148,7 +146,7 @@ impl DlProgress {
                 empty_bar.set_draw_target(ProgressDrawTarget::hidden());
 
                 // Make bar visible again
-                let bar = write_handle.get_mut(&base).unwrap();
+                let bar = write_handle.get_mut(base).unwrap();
                 *bar = self.multi.add(bar.clone());
             }
         }

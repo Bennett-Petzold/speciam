@@ -47,7 +47,7 @@ pub async fn get_robots<C, V, R>(
 where
     C: Borrow<Client>,
     V: Borrow<VisitCache>,
-    R: Borrow<RwLock<HashMap<Url, String>>>,
+    R: Borrow<RwLock<HashMap<String, String>>>,
 {
     let robots_url = LimitedUrl::origin(base_url.join("robots.txt").unwrap_or_else(|e| {
         panic!(
@@ -73,7 +73,7 @@ where
         .borrow()
         .write()
         .unwrap()
-        .insert(base_url.clone(), robots_txt.clone());
+        .insert(robots_url.url_base().to_string(), robots_txt.clone());
 
     Ok(robots_txt)
 }
@@ -89,8 +89,8 @@ where
 pub struct RobotsCheck<Client = Arc<reqwest::Client>, Visited = Arc<VisitCache>> {
     client: Client,
     visited: Visited,
-    robots: RwLock<HashMap<Url, String>>,
-    processing: Mutex<HashMap<Url, Vec<Waker>>>,
+    robots: RwLock<HashMap<String, String>>,
+    processing: Mutex<HashMap<String, Vec<Waker>>>,
     user_agent: String,
 }
 
@@ -109,7 +109,7 @@ impl<C, V> RobotsCheck<C, V> {
         client: C,
         visited: V,
         user_agent: String,
-        robots: HashMap<Url, String>,
+        robots: HashMap<String, String>,
     ) -> Self {
         Self {
             client,
@@ -131,13 +131,12 @@ enum RobotsCheckFutState<'a, Parent> {
     /// Use result from other instance
     AttemptCompute((&'a Parent, &'a LimitedUrl)),
     /// Queued for wakeup with Url and position
-    Queuing((&'a Parent, &'a LimitedUrl, Url, Option<usize>)),
+    Queuing((&'a Parent, &'a LimitedUrl, Option<usize>)),
     /// Loading from remote
     Loading(
         (
             &'a Parent,
             &'a LimitedUrl,
-            Url,
             Pin<Box<dyn Future<Output = Result<String, RobotsErr>> + Send + Sync + 'a>>,
         ),
     ),
@@ -155,19 +154,17 @@ impl<Parent: Debug> Debug for RobotsCheckFutState<'_, Parent> {
                 .field(parent)
                 .field(url)
                 .finish(),
-            RobotsCheckFutState::Queuing((parent, url, base_url, pos)) => f
+            RobotsCheckFutState::Queuing((parent, url, pos)) => f
                 .debug_tuple("RobotsCheckFutState::Computed")
                 .field(parent)
                 .field(url)
-                .field(&base_url)
                 .field(&pos)
                 .finish(),
-            RobotsCheckFutState::Loading((parent, url, base_url, fut)) => {
+            RobotsCheckFutState::Loading((parent, url, fut)) => {
                 let fut_ptr: *const _ = &*fut.as_ref();
                 f.debug_tuple("RobotsCheckFutState::Computed")
                     .field(parent)
                     .field(url)
-                    .field(&base_url)
                     .field(&fut_ptr)
                     .finish()
             }
@@ -234,7 +231,8 @@ where
                     ));
                 }
 
-                RobotsCheckFutState::Loading((parent, url, base_url, fut)) => {
+                RobotsCheckFutState::Loading((parent, url, fut)) => {
+                    let base_url = url.url_base();
                     let load_res = ready!(fut.as_mut().poll(cx));
 
                     let parent = (*parent).borrow();
@@ -254,13 +252,14 @@ where
                                 &parent.user_agent,
                                 url.url().as_str(),
                             ),
-                            robots_txt,
+                            robots_txt.to_string(),
                         ))),
                         Err(e) => Err(e),
                     });
                 }
 
-                RobotsCheckFutState::Queuing((parent, url, url_base, pos)) => {
+                RobotsCheckFutState::Queuing((parent, url, pos)) => {
+                    let url_base = url.url_base();
                     let mut wake_map = (*parent).borrow().processing.lock().unwrap();
 
                     if let Some(queue) = wake_map.get_mut(url_base) {
@@ -303,7 +302,7 @@ where
         let url_base = url.url_base();
         let state = {
             let robots_handle = parent_handle.robots.borrow().read().unwrap();
-            if let Some(robots_txt) = robots_handle.get(&url_base) {
+            if let Some(robots_txt) = robots_handle.get(url_base) {
                 let valid = DefaultMatcher::default().one_agent_allowed_by_robots(
                     robots_txt,
                     &parent_handle.user_agent,
@@ -314,19 +313,18 @@ where
                 drop(robots_handle);
 
                 let mut processing_handle = parent_handle.processing.lock().unwrap();
-                if processing_handle.contains_key(&url_base) {
-                    RobotsCheckFutState::Queuing((parent, url, url_base, None))
+                if processing_handle.contains_key(url_base) {
+                    RobotsCheckFutState::Queuing((parent, url, None))
                 } else {
-                    processing_handle.insert(url_base.clone(), Vec::new());
+                    processing_handle.insert(url_base.to_string(), Vec::new());
                     RobotsCheckFutState::Loading((
                         parent,
                         url,
-                        url_base.clone(),
                         Box::pin(get_robots(
                             parent.borrow().client.borrow(),
                             parent.borrow().visited.borrow(),
                             parent.borrow().robots.borrow(),
-                            url_base,
+                            url.stripped(),
                         )),
                     ))
                 }
@@ -389,7 +387,7 @@ mod tests {
         assert!(matches!(futures::poll!(&mut about_url_fut), Poll::Pending));
         assert!(matches!(
             about_url_fut.state,
-            RobotsCheckFutState::Queuing((_, _, _, Some(0)))
+            RobotsCheckFutState::Queuing((_, _, Some(0)))
         ));
 
         // Resolve both correctly
@@ -435,7 +433,7 @@ mod tests {
                 .iter()
                 .map(|(x, _)| x)
                 .collect::<Vec<_>>(),
-            [&base_url]
+            [base_url.domain().unwrap()]
         );
         assert!(robots.processing.lock().unwrap().is_empty());
 
