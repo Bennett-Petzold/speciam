@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use async_sqlite::rusqlite::Params;
+use async_sqlite::rusqlite::{self, ErrorCode, Params};
 use async_sqlite::Pool;
 use reqwest::Url;
 use speciam::{DepthLimit, LimitedUrl, UniqueLimitedUrl, VisitCache};
@@ -48,12 +48,33 @@ struct UpdateHandle<T> {
     handle: FusedJoinHandle<async_sqlite::Error>,
 }
 
+fn sqlite_retry<F, T>(mut func: F) -> Result<T, rusqlite::Error>
+where
+    F: FnMut() -> Result<T, rusqlite::Error>,
+{
+    loop {
+        match (func)() {
+            Ok(x) => {
+                return Ok(x);
+            }
+            Err(rusqlite::Error::SqliteFailure(e, desc)) => match e.code {
+                ErrorCode::DatabaseBusy => (),
+                ErrorCode::DatabaseLocked => (),
+                _ => return Err(rusqlite::Error::SqliteFailure(e, desc)),
+            },
+            Err(e) => {
+                return Err(e);
+            }
+        }
+    }
+}
+
 impl<T> UpdateHandle<T> {
     pub fn new(pool: Pool, prepared_stmt: &'static str) -> UpdateHandle<T>
     where
-        T: Params + Send + 'static,
+        T: Params + Send + Debug + Clone + 'static,
     {
-        let (tx, mut rx) = unbounded_channel();
+        let (tx, mut rx) = unbounded_channel::<T>();
         let pool_clone = pool.clone();
         let handle = tokio::spawn(async move {
             // Using recv_many allows for batching writes when they're queued
@@ -64,9 +85,9 @@ impl<T> UpdateHandle<T> {
                 let lines = std::mem::take(&mut buffer);
                 pool_clone
                     .conn(|conn| {
-                        let mut stmt = conn.prepare_cached(prepared_stmt)?;
+                        let mut stmt = sqlite_retry(|| conn.prepare_cached(prepared_stmt))?;
                         for arg in lines {
-                            stmt.execute(arg)?;
+                            sqlite_retry(|| stmt.execute(arg.clone()))?;
                         }
                         Ok(())
                     })
@@ -141,14 +162,21 @@ CREATE TABLE IF NOT EXISTS pending(
   url TEXT PRIMARY KEY
 ) WITHOUT ROWID, STRICT;";
 
-const UPDATE_ROBOTS: &str = "INSERT INTO robots(url, body) VALUES (?1, ?2);";
+const UPDATE_ROBOTS: &str = "INSERT OR IGNORE INTO robots(url, body) VALUES (?1, ?2);";
 const UPDATE_VISITED_DEPTHS: &str =
     "INSERT OR REPLACE INTO visited_depths(base_url, depth) VALUES (?1, ?2);";
 const UPDATE_VISITED: &str = "INSERT OR REPLACE INTO visited(base_url, url) VALUES (?1, ?2);";
-const UPDATE_DOMAINS: &str = "INSERT INTO domains(url, depth) VALUES (?1, ?2)";
-const UPDATE_DOMAINS_NOLIMIT: &str = "INSERT INTO domains(url) VALUES (?1)";
-const PUSH_PENDING: &str = "INSERT INTO pending(url) VALUES (?1)";
-const DROP_PENDING: &str = "DELETE FROM pending WHERE url == (?1);";
+const UPDATE_DOMAINS: &str = "INSERT OR IGNORE INTO domains(url, depth) VALUES (?1, ?2)";
+const UPDATE_DOMAINS_NOLIMIT: &str = "INSERT OR IGNORE INTO domains(url) VALUES (?1)";
+const PUSH_PENDING: &str = "INSERT OR IGNORE INTO pending(url) VALUES (?1)";
+const DROP_PENDING_URL: &str = "DELETE FROM pending WHERE url == (?1);";
+
+const DROP_STATE: &str = "
+DELETE FROM robots;
+DELETE FROM visited_depths;
+DELETE FROM visited;
+DELETE FROM pending;
+";
 
 impl TryFrom<Pool> for SqliteLogging {
     type Error = async_sqlite::Error;
@@ -165,7 +193,7 @@ impl TryFrom<Pool> for SqliteLogging {
         let domains = UpdateHandle::new(pool.clone(), UPDATE_DOMAINS);
         let domains_nolimit = UpdateHandle::new(pool.clone(), UPDATE_DOMAINS_NOLIMIT);
         let push_pending = UpdateHandle::new(pool.clone(), PUSH_PENDING);
-        let drop_pending = UpdateHandle::new(pool.clone(), DROP_PENDING);
+        let drop_pending = UpdateHandle::new(pool.clone(), DROP_PENDING_URL);
 
         Ok(Self {
             pool,
@@ -217,7 +245,7 @@ impl SqliteLogging {
     }
 
     /// Log a new domain depth limit.
-    pub fn log_domain<U: Borrow<Url>, S: Borrow<str>>(
+    pub fn log_domain<U: Borrow<Url>>(
         &self,
         url: U,
         depth: Option<usize>,
@@ -247,6 +275,14 @@ impl SqliteLogging {
     pub fn drop_pending<U: Borrow<Url>>(&self, pending: U) -> Result<&Self, async_sqlite::Error> {
         self.drop_pending
             .send([pending.borrow().to_string()])
+            .map(|_| self)
+    }
+
+    /// Drop all saved state.
+    pub async fn drop_state(&self) -> Result<&Self, async_sqlite::Error> {
+        self.pool
+            .conn(|conn| conn.execute(DROP_STATE, []))
+            .await
             .map(|_| self)
     }
 }

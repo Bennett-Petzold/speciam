@@ -1,4 +1,7 @@
-use std::panic::Location;
+use std::{
+    panic::{self, Location},
+    process,
+};
 
 use clap::Parser;
 
@@ -26,6 +29,14 @@ async fn main() {
         // with stack
     });
 
+    // Exit when any thread panics
+    let orig_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        // invoke the default handler and exit the process
+        orig_hook(panic_info);
+        process::exit(1);
+    }));
+
     let args = Args::parse().resolve().await.unwrap();
     let (pending, run_state) = args.init().await.unwrap();
     execute(pending, run_state).await;
@@ -52,8 +63,7 @@ fn spawn_process(
         match run_state.domains.read().await.wait(&url).await {
             // Passed the depth check
             Ok(true) => {
-                println!("Getting URL: {:#?}", url);
-                dl_and_scrape(
+                let res = dl_and_scrape(
                     run_state.client,
                     run_state.visited,
                     run_state.robots,
@@ -62,31 +72,59 @@ fn spawn_process(
                     url.clone(),
                     #[cfg(feature = "resume")]
                     |url: Url, body: &String| {
-                        if let Some(db) = run_state.db.clone() {
-                            db.log_robots(&url, body.as_str())?;
+                        if !run_state.config_only {
+                            if let Some(db) = run_state.db.clone() {
+                                db.log_robots(&url, body.as_str())?;
+                            }
                         }
                         Ok::<_, async_sqlite::Error>(())
                     },
                     #[cfg(feature = "resume")]
                     |parent: &LimitedUrl, children: Vec<Url>| {
-                        if let Some(db) = run_state.db.clone() {
-                            db.log_visited(parent, children)?;
+                        if !run_state.config_only {
+                            if let Some(db) = run_state.db.clone() {
+                                db.log_visited(parent, children)?;
+                            }
                         }
                         Ok(())
                     },
                 )
                 .await
-                .map(|(x, y)| ProcessReturn::Download((x, y)))
+                .map(|(x, y)| ProcessReturn::Download((x, y)));
+
+                #[cfg(feature = "resume")]
+                if !run_state.config_only && res.is_ok() {
+                    if let Some(db) = &run_state.db {
+                        db.drop_pending(url.url()).unwrap();
+                    }
+                }
+
+                res
             }
             // Failed the depth check
-            Ok(false) => Ok(ProcessReturn::NoOp),
+            Ok(false) => {
+                #[cfg(feature = "resume")]
+                if !run_state.config_only {
+                    if let Some(db) = &run_state.db {
+                        db.drop_pending(url.url()).unwrap();
+                    }
+                }
+
+                Ok(ProcessReturn::NoOp)
+            }
             // The domain needs to be initialized
             Err(DomainNotMapped(url)) => {
                 let domains = run_state.domains.clone();
                 let handle = spawn_blocking(move || {
-                    domains
-                        .blocking_write()
-                        .add_limit(&url, run_state.secondary_depth);
+                    let depth = run_state.secondary_depth;
+
+                    domains.blocking_write().add_limit(&url, depth);
+
+                    #[cfg(feature = "resume")]
+                    if let Some(db) = run_state.db {
+                        let _ = db.log_domain(url.url(), depth.into());
+                    }
+
                     url
                 });
                 Ok(ProcessReturn::MappingDomain(handle))
@@ -113,6 +151,13 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
                     ProcessReturn::NoOp => (),
                     ProcessReturn::Download((scrape, wh)) => {
                         for url in scrape {
+                            #[cfg(feature = "resume")]
+                            if !run_state.config_only {
+                                if let Some(db) = &run_state.db {
+                                    db.push_pending(url.url()).unwrap();
+                                }
+                            }
+
                             handles.push(spawn_process(url, run_state.clone()));
                         }
                         if let Some(h) = wh {
@@ -134,7 +179,7 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
             // End of scraping, all queues emptied
             else => {
                 // Finished scraping
-                println!("FINISHED!");
+                println!("FINISHED! STATS TODO");
                 break;
             }
         }
