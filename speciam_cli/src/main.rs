@@ -81,7 +81,7 @@ fn spawn_process(
             // Passed the depth check
             Ok(true) => {
                 let res = dl_and_scrape(
-                    run_state.client,
+                    run_state.client.get_cloned(url.url_base()),
                     run_state.visited,
                     run_state.robots,
                     run_state.base_path,

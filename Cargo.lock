@@ -1755,6 +1755,7 @@ dependencies = [
  "error-stack",
  "futures",
  "indicatif",
+ "once_map",
  "reqwest",
  "speciam",
  "thiserror",
