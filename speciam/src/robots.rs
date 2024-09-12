@@ -12,6 +12,7 @@ use std::{
 
 use reqwest::{Client, StatusCode, Url};
 use robotstxt::DefaultMatcher;
+use texting_robots::Robot;
 use thiserror::Error;
 
 use crate::{LimitedUrl, VisitCache};
@@ -247,11 +248,9 @@ where
 
                     this.state = RobotsCheckFutState::Computed(match load_res {
                         Ok(robots_txt) => Ok(RobotsCheckStatus::Added((
-                            DefaultMatcher::default().one_agent_allowed_by_robots(
-                                &robots_txt,
-                                &parent.user_agent,
-                                url.url().as_str(),
-                            ),
+                            Robot::new(&parent.user_agent, robots_txt.as_bytes())
+                                .map(|x| x.allowed(url.url().as_str()))
+                                .unwrap_or(true),
                             robots_txt.to_string(),
                         ))),
                         Err(e) => Err(e),
@@ -303,11 +302,9 @@ where
         let state = {
             let robots_handle = parent_handle.robots.borrow().read().unwrap();
             if let Some(robots_txt) = robots_handle.get(url_base) {
-                let valid = DefaultMatcher::default().one_agent_allowed_by_robots(
-                    robots_txt,
-                    &parent_handle.user_agent,
-                    url.url().as_str(),
-                );
+                let valid = Robot::new(&parent_handle.user_agent, robots_txt.as_bytes())
+                    .map(|x| x.allowed(url.url().as_str()))
+                    .unwrap_or(true);
                 RobotsCheckFutState::Computed(Ok(RobotsCheckStatus::Cached(valid)))
             } else {
                 drop(robots_handle);
