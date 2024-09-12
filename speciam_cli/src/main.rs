@@ -1,8 +1,16 @@
 use std::{
+    cmp::min,
+    collections::HashMap,
+    io::Write,
     panic::{self, Location},
     path::PathBuf,
+    pin::Pin,
     process::{self, exit},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Condvar, Mutex,
+    },
+    task::{Context, Poll, Waker},
 };
 
 use clap::Parser;
@@ -12,11 +20,12 @@ mod init;
 mod progress;
 use args::Args;
 use error_stack::Report;
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{stream::FuturesUnordered, Stream, StreamExt};
 use init::RunState;
 use reqwest::Version;
 use speciam::{
-    dl_and_scrape, DepthLimit, DlAndScrapeErr, DomainNotMapped, LimitedUrl, WriteHandle,
+    dl_and_scrape, DepthLimit, DlAndScrapeErr, DomainNotMapped, LimitedUrl, ThreadLimiter,
+    WriteHandle,
 };
 use tokio::{
     spawn,
@@ -81,7 +90,7 @@ fn spawn_process(
             // Passed the depth check
             Ok(true) => {
                 let res = dl_and_scrape(
-                    run_state.client.get_cloned(url.url_base()),
+                    run_state.client.clone(),
                     run_state.visited,
                     run_state.robots,
                     run_state.base_path,
@@ -200,6 +209,76 @@ fn prompt_depth(url: &LimitedUrl, default: DepthLimit) -> DepthLimit {
     }
 }
 
+/// Intermediate layer before spawning handles.
+///
+/// Prioritizes the domains with the smallest pending list.
+pub struct Dispatcher {
+    pending: HashMap<String, (usize, Vec<LimitedUrl>)>,
+    in_flight: Arc<(Mutex<Option<Waker>>, AtomicUsize)>,
+    burst: usize,
+    parallel_cap: usize,
+}
+
+impl Dispatcher {
+    pub fn new(
+        in_flight: Arc<(Mutex<Option<Waker>>, AtomicUsize)>,
+        burst: usize,
+        parallel_cap: usize,
+    ) -> Self {
+        Self {
+            pending: HashMap::default(),
+            in_flight,
+            burst,
+            parallel_cap,
+        }
+    }
+
+    pub fn push(&mut self, url: LimitedUrl) {
+        let (count, vec) = self
+            .pending
+            .entry(url.url_base().to_string())
+            .or_insert((0, Vec::new()));
+        *count += 1;
+        vec.push(url);
+    }
+}
+
+impl Stream for Dispatcher {
+    type Item = LimitedUrl;
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+
+        if this.burst == 0 {
+            let mut waker_handle = this.in_flight.0.lock().unwrap();
+            if this.in_flight.1.load(Ordering::Acquire) > this.parallel_cap {
+                // Re-check condition after lock
+                if this.in_flight.1.load(Ordering::Acquire) > this.parallel_cap {
+                    *waker_handle = Some(cx.waker().clone());
+                }
+                return Poll::Pending;
+            }
+
+            this.burst = min(
+                this.pending.values().filter(|x| !x.1.is_empty()).count(),
+                this.parallel_cap * this.parallel_cap,
+            );
+            if this.burst == 0 {
+                return Poll::Ready(None);
+            }
+        }
+
+        this.burst -= 1;
+
+        Poll::Ready(
+            this.pending
+                .values_mut()
+                .filter(|x| !x.1.is_empty())
+                .min_by_key(|x| x.0)
+                .and_then(|x| x.1.pop()),
+        )
+    }
+}
+
 async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
     let prog_reg = |x: &LimitedUrl| {
         if let Some(progress) = &run_state.progress {
@@ -222,13 +301,16 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
         }
     };
 
+    let in_flight = Arc::new((Mutex::default(), AtomicUsize::new(0)));
+    let parallel_cap = run_state.thread_limiter.get_limit();
+    let mut dispatcher = Dispatcher::new(in_flight.clone(), pending.len(), parallel_cap);
+
     // Initialize process handles with the base urls
-    let mut handles = FuturesUnordered::from_iter(
-        pending
-            .into_iter()
-            .inspect(prog_reg)
-            .map(|x| spawn_process(x, run_state.clone())),
-    );
+    let mut handles = FuturesUnordered::<JoinHandle<Result<ProcessReturn, _>>>::new();
+    for initial in pending {
+        prog_reg(&initial);
+        dispatcher.push(initial);
+    }
 
     let mut map_handles = FuturesUnordered::new();
     let mut write_handles = FuturesUnordered::new();
@@ -244,6 +326,7 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
                         },
                         ProcessReturn::Download((source, scrape, wh, ver)) => {
                             prog_free(&source, ver);
+
                             for url in scrape {
                                 #[cfg(feature = "resume")]
                                 if !run_state.config_only {
@@ -253,8 +336,9 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
                                 }
 
                                 prog_reg(&url);
-                                handles.push(spawn_process(url, run_state.clone()));
+                                dispatcher.push(url);
                             }
+
                             if let Some(h) = wh {
                                 prog_reg_write(h.target, h.size_prediction);
                                 write_handles.push(h.handle);
@@ -266,6 +350,20 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
                     }
                     Err(e) => event!(Level::ERROR, "{:#?}", e),
                 }
+
+                // Update in flight counter, if it reaches parallel cap and a
+                // waker exists, use it.
+                let cur_counter = in_flight.1.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                if cur_counter == parallel_cap + 1 {
+                    if let Some(waker) = in_flight.0.lock().unwrap().take() {
+                        waker.wake()
+                    }
+                };
+
+            }
+            Some(dispatch_next) = dispatcher.next() => {
+                in_flight.1.fetch_add(1, std::sync::atomic::Ordering::Release);
+                handles.push(spawn_process(dispatch_next, run_state.clone()))
             }
             // Panic if a write fails
             Some(fin_write) = write_handles.next() => {
@@ -273,7 +371,7 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
                 prog_free_write(path, write_size);
             }
             Some(fin_map) = map_handles.next() => {
-                handles.push(spawn_process(fin_map.unwrap(), run_state.clone()));
+                dispatcher.push(fin_map.unwrap());
             }
             // End of scraping, all queues emptied
             else => {

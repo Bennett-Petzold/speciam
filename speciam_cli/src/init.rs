@@ -33,7 +33,7 @@ pub enum InitErr {
 /// Expected to be immediately destroyed for execution parts.
 #[derive(Clone)]
 pub struct RunState {
-    pub client: Arc<LazyMap<String, Client>>,
+    pub client: Client,
     pub visited: Arc<VisitCache>,
     pub robots: Arc<RobotsCheck<Client>>,
     pub base_path: PathBuf,
@@ -48,19 +48,14 @@ pub struct RunState {
     pub config_only: bool,
 }
 
-fn new_client<'a>(_str: &'a String) -> Client {
-    let user_agent = env!("CARGO_PKG_NAME").to_string() + " " + env!("CARGO_PKG_VERSION");
-    ClientBuilder::new()
-        .use_rustls_tls()
-        .user_agent(&user_agent)
-        .build()
-        .unwrap()
-}
-
 impl ResolvedArgs {
     pub async fn init(mut self) -> Result<(Vec<LimitedUrl>, RunState), Report<InitErr>> {
         let user_agent = env!("CARGO_PKG_NAME").to_string() + " " + env!("CARGO_PKG_VERSION");
-        let client = Arc::new(LazyMap::new(new_client as fn(&String) -> Client));
+        let client = ClientBuilder::new()
+            .use_rustls_tls()
+            .user_agent(&user_agent)
+            .build()
+            .map_err(InitErr::ClientBuild)?;
 
         let domains = Domains::new(self.delay, self.jitter).map_err(InitErr::InvalidDelay)?;
         let base_path = current_dir().map_err(InitErr::InvalidDir)?;
@@ -68,7 +63,7 @@ impl ResolvedArgs {
         let no_db = || {
             let visited: Arc<VisitCache> = Arc::default();
             let robots = Arc::new(RobotsCheck::new(
-                client.get_cloned("robots"),
+                client.clone(),
                 visited.clone(),
                 user_agent.clone(),
             ));
@@ -115,7 +110,7 @@ impl ResolvedArgs {
 
                     let visited = Arc::new(visited?);
                     let robots = Arc::new(RobotsCheck::with_database(
-                        client.get_cloned("robots"),
+                        client.clone(),
                         visited.clone(),
                         user_agent,
                         robots?,

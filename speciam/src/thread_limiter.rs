@@ -163,6 +163,16 @@ impl ThreadLimiter {
             free_mark()
         }
     }
+
+    // Returns true if currently at parallelism limit
+    pub fn at_limit(&self) -> bool {
+        self.limit == self.parallelism.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn get_limit(&self) -> usize {
+        self.limit
+    }
 }
 
 #[cfg(test)]
