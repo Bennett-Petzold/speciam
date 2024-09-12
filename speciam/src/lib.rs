@@ -1,5 +1,9 @@
 mod robots;
-use std::{borrow::Borrow, path::Path};
+use std::{
+    borrow::Borrow,
+    path::Path,
+    sync::{atomic::AtomicU64, Arc},
+};
 
 use reqwest::{header::CONTENT_TYPE, Client, Response, Version};
 pub use robots::*;
@@ -117,6 +121,7 @@ pub async fn dl_and_scrape<
     url: LimitedUrl,
     new_robot_cb: Rcb,
     new_visit_cb: Vcb,
+    write_updates: Option<Arc<AtomicU64>>,
 ) -> Result<(Vec<LimitedUrl>, Option<WriteHandle>, Option<Version>), DlAndScrapeErr<CbErr>>
 where
     C: Borrow<Client> + Unpin,
@@ -150,7 +155,7 @@ where
                 // Wait for resources to free up
                 thread_limiter.mark(&url, version).await;
 
-                let download_res = download(response, base_path).await;
+                let download_res = download(response, base_path, write_updates).await;
                 thread_limiter.unmark(&url, version); // Free the resource
                 let (content, write_handle) = download_res.map_err(DlAndScrapeErr::Download)?;
 
@@ -213,6 +218,7 @@ mod tests {
             homepage_url,
             |_, _| Ok::<_, ()>(()),
             |_, _| Ok::<_, ()>(()),
+            None,
         )
         .await
         .is_err());
@@ -233,6 +239,7 @@ mod tests {
             homepage_url,
             |_, _| Ok::<_, ()>(()),
             |_, _| Ok::<_, ()>(()),
+            None,
         )
         .await
         .unwrap();
@@ -254,6 +261,7 @@ mod tests {
             url.clone(),
             |_, _| Ok::<_, ()>(()),
             |_, _| Ok::<_, ()>(()),
+            None,
         )
         .await
         .unwrap();
@@ -269,6 +277,7 @@ mod tests {
             url,
             |_, _| Ok::<_, ()>(()),
             |_, _| Ok::<_, ()>(()),
+            None,
         )
         .await
         .unwrap();

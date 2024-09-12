@@ -5,15 +5,17 @@ use std::{
     ops::{Deref, DerefMut},
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, RwLock,
     },
+    time::Duration,
 };
 
 use console::{Style, Term};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use reqwest::Version;
 use speciam::LimitedUrl;
+use tokio::time::sleep;
 
 #[derive(Debug, Clone, Copy)]
 pub enum VerOpt {
@@ -120,31 +122,17 @@ impl DerefMut for ProgBarVer {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DlProgress {
     multi: MultiProgress,
     total: ProgressBar,
     total_predicts: Arc<Mutex<HashMap<PathBuf, u64>>>,
     write: ProgressBar,
+    write_progress: Arc<AtomicU64>,
     count: Arc<AtomicUsize>,
     per_domain: Arc<RwLock<HashMap<String, ProgBarVer>>>,
     columns: u16,
-    before_bar: RwLock<u16>,
-}
-
-impl Clone for DlProgress {
-    fn clone(&self) -> Self {
-        Self {
-            multi: self.multi.clone(),
-            total: self.total.clone(),
-            total_predicts: Arc::default(),
-            write: self.write.clone(),
-            count: Arc::new(self.count.load(Ordering::Acquire).into()),
-            per_domain: Arc::new(RwLock::new(self.per_domain.read().unwrap().clone())),
-            columns: self.columns,
-            before_bar: RwLock::new(*self.before_bar.read().unwrap()),
-        }
-    }
+    before_bar: Arc<RwLock<u16>>,
 }
 
 // To fit within 24/25 lines nicely.
@@ -152,8 +140,7 @@ const DOMAIN_LINE_LIMIT: usize = 20;
 
 impl DlProgress {
     pub fn new() -> Self {
-        let multi = MultiProgress::new();
-        multi.set_move_cursor(true);
+        let multi = MultiProgress::with_draw_target(ProgressDrawTarget::stderr_with_hz(1));
 
         let total = ProgressBar::new(0);
         total.set_style(
@@ -178,11 +165,10 @@ impl DlProgress {
         let write = ProgressBar::new(0);
         write.set_style(
             ProgressStyle::with_template(
-                &(Style::new().bold().apply_to("Disk Write:     ").to_string()
-                    + &Style::new()
-                        .green()
-                        .apply_to("[{elapsed_precise}]")
-                        .to_string()
+                &(Style::new()
+                    .bold()
+                    .apply_to("Disk Write:               ")
+                    .to_string()
                     + " [{wide_bar:.red/8}] {binary_bytes}/{binary_total_bytes} "
                     + &Style::new()
                         .magenta()
@@ -194,7 +180,19 @@ impl DlProgress {
             .progress_chars("#>-"),
         );
         let write = multi.add(write);
-        write.tick();
+        let write_progress = Arc::new(AtomicU64::new(0));
+
+        let total_clone = total.clone();
+        let write_clone = write.clone();
+        let write_progress_clone = write_progress.clone();
+        let _background_monitor = tokio::spawn(async move {
+            loop {
+                total_clone.tick(); // Make sure the total exec time progresses
+                let new_progress = write_progress_clone.swap(0, Ordering::AcqRel);
+                write_clone.inc(new_progress);
+                sleep(Duration::from_secs(1)).await;
+            }
+        });
 
         let per_domain: Arc<RwLock<HashMap<String, ProgBarVer>>> = Arc::default();
 
@@ -205,11 +203,16 @@ impl DlProgress {
             total,
             total_predicts: Arc::default(),
             write,
+            write_progress,
             count: AtomicUsize::new(0).into(),
             per_domain,
             columns,
-            before_bar: 0.into(),
+            before_bar: Arc::new(0.into()),
         }
+    }
+
+    pub fn write_progress(&self) -> Arc<AtomicU64> {
+        self.write_progress.clone()
     }
 
     #[inline]
@@ -364,8 +367,6 @@ impl DlProgress {
                 }
                 cmp::Ordering::Equal => (),
             }
-
-            self.write.inc(actual_size);
         }
     }
 }

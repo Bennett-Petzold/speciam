@@ -1759,6 +1759,7 @@ dependencies = [
  "speciam",
  "thiserror",
  "tokio",
+ "tracing",
  "tracing-subscriber",
  "url",
 ]

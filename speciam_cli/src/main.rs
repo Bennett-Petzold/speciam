@@ -22,6 +22,7 @@ use tokio::{
     spawn,
     task::{spawn_blocking, JoinHandle},
 };
+use tracing::{event, Level};
 use url::Url;
 
 #[cfg(feature = "resume")]
@@ -108,6 +109,7 @@ fn spawn_process(
                     },
                     #[cfg(not(feature = "resume"))]
                     |_, _| Ok(()),
+                    run_state.progress.map(|x| x.write_progress()),
                 )
                 .await
                 .map(|(x, y, z)| ProcessReturn::Download((url.clone(), x, y, z)))?;
@@ -234,31 +236,35 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
     loop {
         tokio::select! {
             Some(next) = handles.next() => {
-                match next.map_err(Report::new).unwrap().map_err(Report::new).unwrap() {
-                    ProcessReturn::NoOp(source) => {
-                        prog_free(&source, None);
-                    },
-                    ProcessReturn::Download((source, scrape, wh, ver)) => {
-                        prog_free(&source, ver);
-                        for url in scrape {
-                            #[cfg(feature = "resume")]
-                            if !run_state.config_only {
-                                if let Some(db) = &run_state.db {
-                                    db.push_pending(url.url()).unwrap();
+                // TODO: actually handle HTTP download errors
+                match next.map_err(Report::new).unwrap() {
+                    Ok(next) => match next {
+                        ProcessReturn::NoOp(source) => {
+                            prog_free(&source, None);
+                        },
+                        ProcessReturn::Download((source, scrape, wh, ver)) => {
+                            prog_free(&source, ver);
+                            for url in scrape {
+                                #[cfg(feature = "resume")]
+                                if !run_state.config_only {
+                                    if let Some(db) = &run_state.db {
+                                        db.push_pending(url.url()).unwrap();
+                                    }
                                 }
-                            }
 
-                            prog_reg(&url);
-                            handles.push(spawn_process(url, run_state.clone()));
+                                prog_reg(&url);
+                                handles.push(spawn_process(url, run_state.clone()));
+                            }
+                            if let Some(h) = wh {
+                                prog_reg_write(h.target, h.size_prediction);
+                                write_handles.push(h.handle);
+                            }
                         }
-                        if let Some(h) = wh {
-                            prog_reg_write(h.target, h.size_prediction);
-                            write_handles.push(h.handle);
+                        ProcessReturn::MappingDomain(mapping) => {
+                            map_handles.push(mapping);
                         }
                     }
-                    ProcessReturn::MappingDomain(mapping) => {
-                        map_handles.push(mapping);
-                    }
+                    Err(e) => event!(Level::ERROR, "{:#?}", e),
                 }
             }
             // Panic if a write fails

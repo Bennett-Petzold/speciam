@@ -3,13 +3,15 @@ use std::{
     io::ErrorKind,
     iter::FusedIterator,
     path::{Path, PathBuf},
+    str::FromStr,
+    sync::{atomic::AtomicU64, Arc},
 };
 
 use bytes::Bytes;
 use reqwest::{Client, Response, Url};
 use thiserror::Error;
 use tokio::{
-    fs::{create_dir_all, File},
+    fs::{self, create_dir_all, File},
     io::AsyncWriteExt,
     spawn,
     sync::mpsc::{self, error::SendError},
@@ -156,12 +158,14 @@ pub enum DownloadError {
 /// # Parameters
 /// * `response`: The [`Response`] from a `GET` request.
 /// * `base_path`: The base path for all files to write into.
+/// * `write_updates`: Optional counter to increment mid-write.
 ///
 /// # Return
 /// * All bytes from remote and the background write handle.
 pub async fn download<P>(
     mut response: Response,
     base_path: P,
+    write_updates: Option<Arc<AtomicU64>>,
 ) -> Result<(Vec<u8>, WriteHandle), DownloadError>
 where
     P: Borrow<Path>,
@@ -181,6 +185,25 @@ where
         let dest_clone = dest.clone();
         let write_thread = spawn(async move {
             let dest = dest_clone;
+
+            // Temporarily relocate when directory name == non-directory item
+            let path_pairs = if let Some(parent) = dest.parent() {
+                if parent.exists() && !parent.is_dir() {
+                    let mut parent_temp = parent.as_os_str().to_os_string();
+                    parent_temp.push("_");
+                    let parent_temp = PathBuf::from(parent_temp);
+
+                    let _ = fs::rename(parent, &parent_temp).await;
+                    let post_locate = parent.join(parent.file_name().unwrap());
+
+                    Some((parent_temp, post_locate))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             // Create parent directory
             let _ = create_dir_all(dest.parent().ok_or(WriteError::PathCreate(FileErr {
                 file: dest.clone(),
@@ -188,9 +211,20 @@ where
             }))?)
             .await;
 
-            let mut dest_file = File::create(&dest).await.map_err(|e| {
+            // Move conflicting names into final location
+            if let Some((temp, index)) = path_pairs {
+                let _ = fs::rename(temp, index).await;
+            }
+
+            let dest_noconflict = if dest.is_dir() {
+                dest.join(dest.file_name().unwrap())
+            } else {
+                dest.clone()
+            };
+
+            let mut dest_file = File::create(&dest_noconflict).await.map_err(|e| {
                 WriteError::FileOpen(FileErr {
-                    file: dest.clone(),
+                    file: dest_noconflict.clone(),
                     source: e,
                 })
             })?;
@@ -199,6 +233,12 @@ where
             // Write out all the chunks as provided.
             while let Some(chunk) = rx.recv().await {
                 write_counter += chunk.len() as u64;
+
+                if let Some(write_updates) = &write_updates {
+                    write_updates
+                        .fetch_add(chunk.len() as u64, std::sync::atomic::Ordering::Release);
+                };
+
                 dest_file
                     .write_all(&chunk)
                     .await
@@ -248,7 +288,7 @@ mod tests {
         let url = Url::from_str(LINUX_HOMEPAGE).unwrap();
         let homepage_response = get(url).await.unwrap();
 
-        let (content, write_thread) = download(homepage_response, temp_path).await.unwrap();
+        let (content, write_thread) = download(homepage_response, temp_path, None).await.unwrap();
         assert!(!content.is_empty());
         write_thread.handle.await.unwrap().unwrap();
     }
