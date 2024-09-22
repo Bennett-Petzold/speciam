@@ -12,7 +12,6 @@ use std::{
 
 use bare_err_tree::err_tree;
 use reqwest::{Client, StatusCode, Url};
-use robotstxt::DefaultMatcher;
 use texting_robots::Robot;
 use thiserror::Error;
 

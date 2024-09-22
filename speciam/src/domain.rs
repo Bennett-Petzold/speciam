@@ -179,6 +179,12 @@ impl DomainNotMapped {
 #[error("Duration is zero length")]
 pub struct ZeroLengthDuration {}
 
+impl Default for ZeroLengthDuration {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ZeroLengthDuration {
     #[track_caller]
     pub fn new() -> Self {

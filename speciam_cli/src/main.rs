@@ -1,14 +1,13 @@
 use std::{
     cmp::min,
     collections::HashMap,
-    io::Write,
     panic::{self, Location},
     path::PathBuf,
     pin::Pin,
     process::{self, exit},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Condvar, Mutex,
+        Arc, Mutex,
     },
     task::{Context, Poll, Waker},
 };
@@ -24,8 +23,7 @@ use futures::{stream::FuturesUnordered, Stream, StreamExt};
 use init::RunState;
 use reqwest::Version;
 use speciam::{
-    dl_and_scrape, DepthLimit, DlAndScrapeErr, DomainNotMapped, LimitedUrl, ThreadLimiter,
-    WriteHandle,
+    dl_and_scrape, DepthLimit, DlAndScrapeErr, DomainNotMapped, LimitedUrl, WriteHandle,
 };
 use tokio::{
     spawn,

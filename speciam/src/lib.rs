@@ -5,7 +5,6 @@ use std::{
     sync::{atomic::AtomicU64, Arc},
 };
 
-use bare_err_tree::err_tree;
 use reqwest::{header::CONTENT_TYPE, Client, Response, Version};
 pub use robots::*;
 

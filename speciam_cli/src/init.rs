@@ -1,7 +1,6 @@
 use std::{env::current_dir, path::PathBuf, sync::Arc};
 
 use error_stack::Report;
-use once_map::{LazyMap, RandomState};
 use reqwest::{Client, ClientBuilder};
 use speciam::{
     CannotBeABase, DepthLimit, Domains, LimitedUrl, RobotsCheck, ThreadLimiter, VisitCache,

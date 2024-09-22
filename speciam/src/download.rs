@@ -3,7 +3,6 @@ use std::{
     io::ErrorKind,
     iter::FusedIterator,
     path::{Path, PathBuf},
-    str::FromStr,
     sync::{atomic::AtomicU64, Arc},
 };
 
