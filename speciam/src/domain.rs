@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use bare_err_tree::err_tree;
 use governor::{DefaultKeyedRateLimiter, Jitter, Quota, RateLimiter};
 use once_map::OnceMap;
 use thiserror::Error;
@@ -29,16 +30,27 @@ pub struct LimitedUrl {
     depth: usize,
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[error("url cannot-be-a-base: {0:#?}")]
-pub struct CannotBeABase(Url);
+#[derive(Debug)]
+#[err_tree]
+#[derive(Error, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[error("url cannot-be-a-base: {url:#?}")]
+pub struct CannotBeABase {
+    url: Url,
+}
+
+impl CannotBeABase {
+    #[track_caller]
+    pub fn new(url: Url) -> Self {
+        Self::_tree(url)
+    }
+}
 
 impl LimitedUrl {
     /// Construct and calculate depth based on `parent`.
     ///
     /// `url` must be resolvable to a domain.
     pub fn new(parent: &Self, url: Url) -> Result<Self, CannotBeABase> {
-        let base_url = url.domain().ok_or(CannotBeABase(url.clone()))?;
+        let base_url = url.domain().ok_or(CannotBeABase::new(url.clone()))?;
 
         // Depth starts again on zero when the domain changes.
         let depth = if base_url == parent.url_base() {
@@ -54,7 +66,7 @@ impl LimitedUrl {
     ///
     /// `url` must be resolvable to some domain.
     pub fn at_depth(url: Url, depth: usize) -> Result<Self, CannotBeABase> {
-        url.domain().ok_or(CannotBeABase(url.clone()))?;
+        url.domain().ok_or(CannotBeABase::new(url.clone()))?;
         Ok(Self { url, depth })
     }
 
@@ -146,13 +158,33 @@ impl DepthLimit {
     }
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[error("Domain of URL is not mapped in Domains. URL: {0:#?}")]
-pub struct DomainNotMapped(pub LimitedUrl);
+#[derive(Debug)]
+#[err_tree]
+#[derive(Error, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[error("Domain of URL is not mapped in Domains. URL: {url:#?}")]
+pub struct DomainNotMapped {
+    pub url: LimitedUrl,
+}
 
-#[derive(Debug, Error, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+impl DomainNotMapped {
+    #[track_caller]
+    pub fn new(url: LimitedUrl) -> Self {
+        Self::_tree(url)
+    }
+}
+
+#[derive(Debug)]
+#[err_tree]
+#[derive(Error, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[error("Duration is zero length")]
 pub struct ZeroLengthDuration {}
+
+impl ZeroLengthDuration {
+    #[track_caller]
+    pub fn new() -> Self {
+        Self::_tree()
+    }
+}
 
 /// A store for rate and depth limits on a domain.
 #[derive(Debug)]
@@ -168,7 +200,7 @@ pub struct Domains {
 
 impl Domains {
     pub fn new(rate_period: Duration, jitter: Duration) -> Result<Self, ZeroLengthDuration> {
-        let quota = Quota::with_period(rate_period).ok_or(ZeroLengthDuration {})?;
+        let quota = Quota::with_period(rate_period).ok_or(ZeroLengthDuration::new())?;
         Ok(Self {
             rate_limiter: RateLimiter::keyed(quota),
             depth_limits: OnceMap::default(),
@@ -227,7 +259,7 @@ impl Domains {
         let limit = self
             .depth_limits
             .map_get(base_url, |_, x| *x)
-            .ok_or(DomainNotMapped(url.clone()))?;
+            .ok_or(DomainNotMapped::new(url.clone()))?;
 
         Ok(if limit.within(url.depth()) {
             let jitter = Jitter::new(Duration::ZERO, self.jitter);

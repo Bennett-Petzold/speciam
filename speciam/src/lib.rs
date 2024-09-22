@@ -5,6 +5,7 @@ use std::{
     sync::{atomic::AtomicU64, Arc},
 };
 
+use bare_err_tree::err_tree;
 use reqwest::{header::CONTENT_TYPE, Client, Response, Version};
 pub use robots::*;
 
@@ -73,13 +74,13 @@ pub fn add_index(response: &Response) -> Url {
 pub enum DlAndScrapeErr<C = ()> {
     /// Contains [`RobotsErr`].
     #[error("failure while checking robots.txt")]
-    RobotsCheck(#[source] RobotsErr),
+    RobotsCheck(#[source] RobotsErrWrap),
     #[error("failure while making an initial request")]
     GetResponse(#[source] reqwest::Error),
     #[error("failure while downloading")]
-    Download(#[source] DownloadError),
+    Download(#[source] DownloadErrorWrap),
     #[error("failure while scraping")]
-    Scrape(#[source] ScrapeError),
+    Scrape(#[source] ScrapeErrorWrap),
     #[error("logging callback failed")]
     CB(#[source] C),
 }

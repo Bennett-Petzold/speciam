@@ -40,6 +40,7 @@ pub struct RunState {
     pub domains: Arc<RwLock<Domains>>,
     pub thread_limiter: Arc<ThreadLimiter>,
     pub secondary_depth: DepthLimit,
+    pub primary_domains: Box<[String]>,
     pub interactive: bool,
     pub progress: Option<DlProgress>,
     #[cfg(feature = "resume")]
@@ -152,6 +153,7 @@ impl ResolvedArgs {
                 domains: Arc::new(RwLock::new(domains)),
                 thread_limiter: Arc::new(ThreadLimiter::new(self.units)),
                 secondary_depth: self.secondary_depth,
+                primary_domains: self.primary_domains.into(),
                 interactive: !self.no_prompt,
                 progress: self.bars.then_some(DlProgress::new()),
                 #[cfg(feature = "resume")]

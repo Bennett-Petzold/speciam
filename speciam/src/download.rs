@@ -7,6 +7,7 @@ use std::{
     sync::{atomic::AtomicU64, Arc},
 };
 
+use bare_err_tree::err_tree;
 use bytes::Bytes;
 use reqwest::{Client, Response, Url};
 use thiserror::Error;
@@ -92,22 +93,36 @@ where
     Ok((page_response, unique_urls))
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
+#[err_tree]
+#[derive(Error)]
 #[error("File: {file:?}")]
 pub struct FileErr {
     file: PathBuf,
+    #[dyn_err]
     #[source]
     source: std::io::Error,
 }
 
+impl FileErr {
+    #[track_caller]
+    pub fn new(file: PathBuf, source: std::io::Error) -> Self {
+        Self::_tree(file, source)
+    }
+}
+
 /// Background write failure.
 #[derive(Debug, Error)]
+#[err_tree(WriteErrorWrap)]
 pub enum WriteError {
     #[error("failed to create the path")]
+    #[tree_err]
     PathCreate(#[source] FileErr),
     #[error("failed to open the file for writing")]
+    #[tree_err]
     FileOpen(#[source] FileErr),
     #[error("failed during write")]
+    #[dyn_err]
     Write(#[source] std::io::Error),
 }
 
@@ -117,23 +132,37 @@ pub enum WriteError {
 /// Errors are not recoverable.
 #[derive(Debug)]
 pub struct WriteHandle {
-    pub handle: JoinHandle<Result<(PathBuf, u64), WriteError>>,
+    pub handle: JoinHandle<Result<(PathBuf, u64), WriteErrorWrap>>,
     pub size_prediction: Option<u64>,
     pub target: PathBuf,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
+#[err_tree]
+#[derive(Error)]
 #[error("lost connection to the writer thread")]
 pub struct LostWriter {
+    #[dyn_err]
     send_err: SendError<Bytes>,
+    #[tree_err]
     #[source]
-    handle_err: WriteError,
+    handle_err: WriteErrorWrap,
+}
+
+impl LostWriter {
+    #[track_caller]
+    pub fn new(send_err: SendError<Bytes>, handle_err: WriteErrorWrap) -> Self {
+        LostWriter::_tree(send_err, handle_err)
+    }
 }
 
 #[derive(Debug, Error)]
+#[err_tree(DownloadErrorWrap)]
 pub enum DownloadError {
+    #[tree_err]
     #[error("{0:?}")]
     LostWriter(#[source] LostWriter),
+    #[dyn_err]
     #[error("failure while pulling from remote")]
     Reqwest(#[source] reqwest::Error),
     #[error("no top-level domain for URL: {0:?}")]
@@ -166,7 +195,7 @@ pub async fn download<P>(
     mut response: Response,
     base_path: P,
     write_updates: Option<Arc<AtomicU64>>,
-) -> Result<(Vec<u8>, WriteHandle), DownloadError>
+) -> Result<(Vec<u8>, WriteHandle), DownloadErrorWrap>
 where
     P: Borrow<Path>,
 {
@@ -205,10 +234,10 @@ where
             };
 
             // Create parent directory
-            let _ = create_dir_all(dest.parent().ok_or(WriteError::PathCreate(FileErr {
-                file: dest.clone(),
-                source: ErrorKind::NotFound.into(),
-            }))?)
+            let _ = create_dir_all(dest.parent().ok_or(WriteError::PathCreate(FileErr::new(
+                dest.clone(),
+                ErrorKind::NotFound.into(),
+            )))?)
             .await;
 
             // Move conflicting names into final location
@@ -222,12 +251,9 @@ where
                 dest.clone()
             };
 
-            let mut dest_file = File::create(&dest_noconflict).await.map_err(|e| {
-                WriteError::FileOpen(FileErr {
-                    file: dest_noconflict.clone(),
-                    source: e,
-                })
-            })?;
+            let mut dest_file = File::create(&dest_noconflict)
+                .await
+                .map_err(|e| WriteError::FileOpen(FileErr::new(dest_noconflict.clone(), e)))?;
 
             let mut write_counter = 0;
             // Write out all the chunks as provided.
@@ -259,16 +285,17 @@ where
         while let Some(chunk) = response.chunk().await.map_err(DownloadError::Reqwest)? {
             content.extend_from_slice(&chunk);
             if let Err(e) = tx.send(chunk) {
-                return Err(DownloadError::LostWriter(LostWriter {
-                    send_err: e,
-                    handle_err: write_handle.handle.await.unwrap().unwrap_err(),
-                }));
+                return Err(DownloadError::LostWriter(LostWriter::new(
+                    e,
+                    write_handle.handle.await.unwrap().unwrap_err(),
+                ))
+                .into());
             }
         }
 
         Ok((content, write_handle))
     } else {
-        Err(DownloadError::NoDomain(url))
+        Err(DownloadError::NoDomain(url).into())
     }
 }
 

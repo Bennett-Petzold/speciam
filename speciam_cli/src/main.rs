@@ -144,7 +144,7 @@ fn spawn_process(
                 Ok(ProcessReturn::NoOp(url))
             }
             // The domain needs to be initialized
-            Err(DomainNotMapped(url)) => {
+            Err(DomainNotMapped { url, .. }) => {
                 let domains = run_state.domains.clone();
                 let handle = spawn_blocking(move || {
                     let depth = if run_state.interactive {
@@ -317,6 +317,10 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
 
     loop {
         tokio::select! {
+            Some(dispatch_next) = dispatcher.next() => {
+                in_flight.1.fetch_add(1, std::sync::atomic::Ordering::Release);
+                handles.push(spawn_process(dispatch_next, run_state.clone()))
+            }
             Some(next) = handles.next() => {
                 // TODO: actually handle HTTP download errors
                 match next.map_err(Report::new).unwrap() {
@@ -328,15 +332,18 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
                             prog_free(&source, ver);
 
                             for url in scrape {
-                                #[cfg(feature = "resume")]
-                                if !run_state.config_only {
-                                    if let Some(db) = &run_state.db {
-                                        db.push_pending(url.url()).unwrap();
+                                if source.url_base() == url.url_base() ||
+                                    run_state.primary_domains.contains(&source.url_base().to_string()) {
+                                    #[cfg(feature = "resume")]
+                                    if !run_state.config_only {
+                                        if let Some(db) = &run_state.db {
+                                            db.push_pending(url.url()).unwrap();
+                                        }
                                     }
-                                }
 
-                                prog_reg(&url);
-                                dispatcher.push(url);
+                                    prog_reg(&url);
+                                    dispatcher.push(url);
+                                }
                             }
 
                             if let Some(h) = wh {
@@ -351,19 +358,15 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
                     Err(e) => event!(Level::ERROR, "{:#?}", e),
                 }
 
-                // Update in flight counter, if it reaches parallel cap and a
-                // waker exists, use it.
+                // Update in flight counter, if it goes below parallel cap and
+                // a waker exists, use it.
                 let cur_counter = in_flight.1.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-                if cur_counter == parallel_cap + 1 {
+                if cur_counter <= parallel_cap + 1 {
                     if let Some(waker) = in_flight.0.lock().unwrap().take() {
                         waker.wake()
                     }
                 };
 
-            }
-            Some(dispatch_next) = dispatcher.next() => {
-                in_flight.1.fetch_add(1, std::sync::atomic::Ordering::Release);
-                handles.push(spawn_process(dispatch_next, run_state.clone()))
             }
             // Panic if a write fails
             Some(fin_write) = write_handles.next() => {

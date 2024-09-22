@@ -183,6 +183,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "bare_err_tree"
+version = "0.2.1"
+dependencies = [
+ "bare_err_tree_proc",
+]
+
+[[package]]
+name = "bare_err_tree_proc"
+version = "0.2.2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.77",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1799,6 +1815,7 @@ dependencies = [
 name = "speciam"
 version = "0.1.0"
 dependencies = [
+ "bare_err_tree",
  "bytes",
  "error-stack",
  "futures",

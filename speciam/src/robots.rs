@@ -10,6 +10,7 @@ use std::{
     task::{ready, Context, Poll, Waker},
 };
 
+use bare_err_tree::err_tree;
 use reqwest::{Client, StatusCode, Url};
 use robotstxt::DefaultMatcher;
 use texting_robots::Robot;
@@ -18,11 +19,14 @@ use thiserror::Error;
 use crate::{LimitedUrl, VisitCache};
 
 #[derive(Debug, Error)]
+#[err_tree(RobotsErrWrap)]
 pub enum RobotsErr {
     #[error("url_on_site cannot-be-a-base")]
     InvalidUrl,
+    #[dyn_err]
     #[error("failure while getting response")]
     Response(#[source] reqwest::Error),
+    #[dyn_err]
     #[error("failure while getting text body")]
     Text(#[source] reqwest::Error),
 }
@@ -44,7 +48,7 @@ pub async fn get_robots<C, V, R>(
     visited: V,
     robots: R,
     base_url: Url,
-) -> Result<String, RobotsErr>
+) -> Result<String, RobotsErrWrap>
 where
     C: Borrow<Client>,
     V: Borrow<VisitCache>,
@@ -67,7 +71,7 @@ where
         Ok(response) => response.text().await.map_err(RobotsErr::Text)?,
         // Treat no `robots.txt` as full permission.
         Err(e) if e.status() == Some(StatusCode::NOT_FOUND) => "".to_string(),
-        Err(e) => return Err(RobotsErr::Response(e)),
+        Err(e) => return Err(RobotsErr::Response(e).into()),
     };
 
     let _ = robots
@@ -128,7 +132,7 @@ impl<C, V> RobotsCheck<C, V> {
 )]
 enum RobotsCheckFutState<'a, Parent> {
     /// Finished checking
-    Computed(Result<RobotsCheckStatus, RobotsErr>),
+    Computed(Result<RobotsCheckStatus, RobotsErrWrap>),
     /// Use result from other instance
     AttemptCompute((&'a Parent, &'a LimitedUrl)),
     /// Queued for wakeup with Url and position
@@ -138,7 +142,7 @@ enum RobotsCheckFutState<'a, Parent> {
         (
             &'a Parent,
             &'a LimitedUrl,
-            Pin<Box<dyn Future<Output = Result<String, RobotsErr>> + Send + Sync + 'a>>,
+            Pin<Box<dyn Future<Output = Result<String, RobotsErrWrap>> + Send + Sync + 'a>>,
         ),
     ),
 }
@@ -218,7 +222,7 @@ where
     V: Borrow<VisitCache> + Unpin + 'a,
     P: Borrow<RobotsCheck<C, V>> + Unpin + 'a,
 {
-    type Output = Result<RobotsCheckStatus, RobotsErr>;
+    type Output = Result<RobotsCheckStatus, RobotsErrWrap>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
