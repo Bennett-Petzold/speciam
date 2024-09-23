@@ -42,16 +42,18 @@ pub enum RobotsErr {
 /// * `visited`: A set of already visited [`Url`]s.
 /// * `robots`: The map of base [`Url`]s to `robot.txt` bodies.
 /// * `base_url`: The base site [`Url`] (e.g. `https://google.com`).
-pub async fn get_robots<C, V, R>(
+pub async fn get_robots<C, V, R, S>(
     client: C,
     visited: V,
     robots: R,
     base_url: Url,
+    user_agent: S,
 ) -> Result<String, RobotsErrWrap>
 where
     C: Borrow<Client>,
     V: Borrow<VisitCache>,
-    R: Borrow<RwLock<HashMap<String, String>>>,
+    R: Borrow<RwLock<HashMap<String, Option<Robot>>>>,
+    S: AsRef<str>,
 {
     let robots_url = LimitedUrl::origin(base_url.join("robots.txt").unwrap_or_else(|e| {
         panic!(
@@ -73,11 +75,10 @@ where
         Err(e) => return Err(RobotsErr::Response(e).into()),
     };
 
-    let _ = robots
-        .borrow()
-        .write()
-        .unwrap()
-        .insert(robots_url.url_base().to_string(), robots_txt.clone());
+    let _ = robots.borrow().write().unwrap().insert(
+        robots_url.url_base().to_string(),
+        Robot::new(user_agent.as_ref(), robots_txt.as_bytes()).ok(),
+    );
 
     Ok(robots_txt)
 }
@@ -93,7 +94,7 @@ where
 pub struct RobotsCheck<Client = Arc<reqwest::Client>, Visited = Arc<VisitCache>> {
     client: Client,
     visited: Visited,
-    robots: RwLock<HashMap<String, String>>,
+    robots: RwLock<HashMap<String, Option<Robot>>>,
     processing: Mutex<HashMap<String, Vec<Waker>>>,
     user_agent: String,
 }
@@ -113,7 +114,7 @@ impl<C, V> RobotsCheck<C, V> {
         client: C,
         visited: V,
         user_agent: String,
-        robots: HashMap<String, String>,
+        robots: HashMap<String, Option<Robot>>,
     ) -> Self {
         Self {
             client,
@@ -305,7 +306,8 @@ where
         let state = {
             let robots_handle = parent_handle.robots.borrow().read().unwrap();
             if let Some(robots_txt) = robots_handle.get(url_base) {
-                let valid = Robot::new(&parent_handle.user_agent, robots_txt.as_bytes())
+                let valid = robots_txt
+                    .as_ref()
                     .map(|x| x.allowed(url.url().as_str()))
                     .unwrap_or(true);
                 RobotsCheckFutState::Computed(Ok(RobotsCheckStatus::Cached(valid)))
@@ -325,6 +327,7 @@ where
                             parent.borrow().visited.borrow(),
                             parent.borrow().robots.borrow(),
                             url.stripped(),
+                            &parent.borrow().user_agent,
                         )),
                     ))
                 }

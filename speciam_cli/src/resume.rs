@@ -11,6 +11,7 @@ use async_sqlite::Pool;
 use bare_err_tree::err_tree;
 use reqwest::Url;
 use speciam::{DepthLimit, LimitedUrl, UniqueLimitedUrl, VisitCache};
+use texting_robots::Robot;
 use thiserror::Error;
 use tokio::{
     spawn,
@@ -313,7 +314,10 @@ pub enum LimitRecoveryErr {
 // Recovering existing logs
 impl SqliteLogging {
     /// Return any parsed `robots.txt` from a previous run.
-    pub async fn restore_robots(&self) -> Result<HashMap<String, String>, GenRecoveryErrWrap> {
+    pub async fn restore_robots(
+        &self,
+        user_agent: &str,
+    ) -> Result<HashMap<String, Option<Robot>>, GenRecoveryErrWrap> {
         let lines: Vec<(String, String)> = self
             .pool
             .conn(|conn| {
@@ -323,7 +327,10 @@ impl SqliteLogging {
             })
             .await
             .map_err(GenRecoveryErr::from)?;
-        Ok(lines.into_iter().collect())
+        Ok(lines
+            .into_iter()
+            .map(|(url, body)| (url, Robot::new(user_agent, body.as_bytes()).ok()))
+            .collect())
     }
 
     /// Return any visited mappings from a previous run.

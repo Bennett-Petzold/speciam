@@ -126,9 +126,10 @@ impl ResolvedArgs {
                 });
 
                 let db_clone = db.clone();
+                let user_agent_clone = user_agent.clone();
                 let robots_fut = tokio::spawn(async move {
                     db_clone
-                        .restore_robots()
+                        .restore_robots(user_agent_clone.as_str())
                         .await
                         .map_err(InitErr::from)
                         .map_err(InitErrWrap::from)
