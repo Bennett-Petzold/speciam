@@ -1,6 +1,6 @@
 use std::{env::current_dir, path::PathBuf, sync::Arc};
 
-use bare_err_tree::{AsErrTree, ErrTree, ErrTreePkg};
+use bare_err_tree::{tree, AsErrTree, ErrTreePkg};
 use reqwest::{Client, ClientBuilder};
 use speciam::{
     CannotBeABase, DepthLimit, Domains, LimitedUrl, RobotsCheck, ThreadLimiter, VisitCache,
@@ -46,33 +46,13 @@ impl From<InitErr> for InitErrWrap {
 impl AsErrTree for InitErrWrap {
     fn as_err_tree(&self, func: &mut dyn FnMut(bare_err_tree::ErrTree<'_>)) {
         match &self.inner {
-            InitErr::ClientBuild(x) => (func)(ErrTree::with_pkg(
-                &self.inner,
-                &[&[&(x as &dyn std::error::Error) as &dyn AsErrTree]],
-                self._err_tree_pkg.clone(),
-            )),
-            InitErr::InvalidDir(x) => (func)(ErrTree::with_pkg(
-                &self.inner,
-                &[&[&(x as &dyn std::error::Error) as &dyn AsErrTree]],
-                self._err_tree_pkg.clone(),
-            )),
-            InitErr::InvalidDelay(x) => (func)(ErrTree::with_pkg(
-                &self.inner,
-                &[&[x as &dyn AsErrTree]],
-                self._err_tree_pkg.clone(),
-            )),
+            InitErr::ClientBuild(x) => tree!(dyn, func, self.inner, self._err_tree_pkg, x),
+            InitErr::InvalidDir(x) => tree!(dyn, func, self.inner, self._err_tree_pkg, x),
+            InitErr::InvalidDelay(x) => tree!(func, self.inner, self._err_tree_pkg, x),
             #[cfg(feature = "resume")]
-            InitErr::GenRecoveryErr(x) => (func)(ErrTree::with_pkg(
-                &self.inner,
-                &[&[x as &dyn AsErrTree]],
-                self._err_tree_pkg.clone(),
-            )),
+            InitErr::GenRecoveryErr(x) => tree!(func, self.inner, self._err_tree_pkg, x),
             #[cfg(feature = "resume")]
-            InitErr::LimitRecoveryErr(x) => (func)(ErrTree::with_pkg(
-                &self.inner,
-                &[&[x as &dyn AsErrTree]],
-                self._err_tree_pkg.clone(),
-            )),
+            InitErr::LimitRecoveryErr(x) => tree!(func, self.inner, self._err_tree_pkg, x),
         }
     }
 }

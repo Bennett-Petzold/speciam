@@ -161,10 +161,8 @@ impl DepthLimit {
 #[derive(Debug)]
 #[err_tree]
 #[derive(Error, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[error("Domain of URL is not mapped in Domains. URL: {url:#?}")]
-pub struct DomainNotMapped {
-    pub url: LimitedUrl,
-}
+#[error("Domain of URL is not mapped in Domains. URL: {0:#?}")]
+pub struct DomainNotMapped(pub LimitedUrl);
 
 impl DomainNotMapped {
     #[track_caller]
@@ -177,20 +175,7 @@ impl DomainNotMapped {
 #[err_tree]
 #[derive(Clone, Error)]
 #[error("Duration is zero length")]
-pub struct ZeroLengthDuration {}
-
-impl Default for ZeroLengthDuration {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ZeroLengthDuration {
-    #[track_caller]
-    pub fn new() -> Self {
-        Self::_tree()
-    }
-}
+pub struct ZeroLengthDuration;
 
 /// A store for rate and depth limits on a domain.
 #[derive(Debug)]

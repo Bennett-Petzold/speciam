@@ -22,9 +22,7 @@ use args::Args;
 use futures::{stream::FuturesUnordered, Stream, StreamExt};
 use init::RunState;
 use reqwest::Version;
-use speciam::{
-    dl_and_scrape, DepthLimit, DlAndScrapeErr, DomainNotMapped, LimitedUrl, WriteHandle,
-};
+use speciam::{dl_and_scrape, DepthLimit, DlAndScrapeErr, LimitedUrl, WriteHandle};
 use tokio::{
     spawn,
     task::{spawn_blocking, JoinHandle},
@@ -128,7 +126,8 @@ fn spawn_process(
                 Ok(ProcessReturn::NoOp(url))
             }
             // The domain needs to be initialized
-            Err(DomainNotMapped { url, .. }) => {
+            Err(e) => {
+                let url = e.0;
                 let domains = run_state.domains.clone();
                 let handle = spawn_blocking(move || {
                     let depth = if run_state.interactive {

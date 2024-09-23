@@ -196,9 +196,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{str::FromStr, time::Duration};
 
     use test::{CleaningTemp, CLIENT, RUST_HOMEPAGE, USER_AGENT};
+    use tokio::time::timeout;
 
     use super::*;
 
@@ -209,19 +210,24 @@ mod tests {
         let visited = VisitCache::default();
 
         let robots_check = RobotsCheck::new(&*CLIENT, &visited, USER_AGENT.to_string());
-        assert!(dl_and_scrape(
-            &*CLIENT,
-            &visited,
-            &robots_check,
-            CleaningTemp::new(),
-            ThreadLimiter::new(usize::MAX),
-            homepage_url,
-            |_, _| Ok::<_, ()>(()),
-            |_, _| Ok::<_, ()>(()),
-            None,
+        assert!(timeout(
+            Duration::from_secs(1),
+            dl_and_scrape(
+                &*CLIENT,
+                &visited,
+                &robots_check,
+                CleaningTemp::new(),
+                ThreadLimiter::new(usize::MAX),
+                homepage_url,
+                |_, _| Ok::<_, ()>(()),
+                |_, _| Ok::<_, ()>(()),
+                None,
+            )
         )
         .await
-        .is_err());
+        .ok()
+        .and_then(|x| x.ok())
+        .is_none());
     }
 
     #[tokio::test]

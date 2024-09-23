@@ -1,9 +1,6 @@
-use std::{
-    cmp::min, error::Error, fmt::Debug, path::PathBuf, thread::available_parallelism,
-    time::Duration,
-};
+use std::{cmp::min, fmt::Debug, path::PathBuf, thread::available_parallelism, time::Duration};
 
-use bare_err_tree::{err_tree, AsErrTree, ErrTree, ErrTreePkg};
+use bare_err_tree::{err_tree, tree, AsErrTree, ErrTreePkg};
 use clap::Parser;
 use reqwest::Url;
 use speciam::{CannotBeABase, DepthLimit, LimitedUrl};
@@ -151,28 +148,12 @@ impl From<ResolveErr> for ResolveErrWrap {
 impl AsErrTree for ResolveErrWrap {
     fn as_err_tree(&self, func: &mut dyn FnMut(bare_err_tree::ErrTree<'_>)) {
         match &self.inner {
-            ResolveErr::InvalidPrimaryDomain(x) => (func)(ErrTree::with_pkg(
-                &self.inner,
-                &[&[x as &dyn AsErrTree]],
-                self._err_tree_pkg.clone(),
-            )),
-            ResolveErr::NoLogFile(x) => (func)(ErrTree::with_pkg(
-                &self.inner,
-                &[&[&(x as &dyn Error) as &dyn AsErrTree]],
-                self._err_tree_pkg.clone(),
-            )),
+            ResolveErr::InvalidPrimaryDomain(x) => tree!(func, self.inner, self._err_tree_pkg, x),
+            ResolveErr::NoLogFile(x) => tree!(dyn, func, self.inner, self._err_tree_pkg, x),
             #[cfg(feature = "resume")]
-            ResolveErr::SqliteOpen(x) => (func)(ErrTree::with_pkg(
-                &self.inner,
-                &[&[&(x as &dyn Error) as &dyn AsErrTree]],
-                self._err_tree_pkg.clone(),
-            )),
+            ResolveErr::SqliteOpen(x) => tree!(dyn, func, self.inner, self._err_tree_pkg, x),
             #[cfg(feature = "resume")]
-            ResolveErr::SqliteInit(x) => (func)(ErrTree::with_pkg(
-                &self.inner,
-                &[&[&(x as &dyn Error) as &dyn AsErrTree]],
-                self._err_tree_pkg.clone(),
-            )),
+            ResolveErr::SqliteInit(x) => tree!(dyn, func, self.inner, self._err_tree_pkg, x),
         }
     }
 }
