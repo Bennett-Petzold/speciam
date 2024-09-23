@@ -1,6 +1,6 @@
 [package]
 name = "speciam_cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [features]
@@ -23,5 +23,6 @@ texting_robots = "0.2.2"
 thiserror = "1.0.63"
 tokio = { version = "1.40.0", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1.40"
+tracing-error = { version = "0.2.0", default-features = false }
 tracing-subscriber = { version = "0.3.18", optional = true, features = ["json"] }
 url = "2.5.2"

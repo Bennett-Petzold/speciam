@@ -79,6 +79,7 @@ pub struct RunState {
 }
 
 impl ResolvedArgs {
+    #[tracing::instrument]
     pub async fn init(mut self) -> Result<(Vec<LimitedUrl>, RunState), InitErrWrap> {
         let user_agent = env!("CARGO_PKG_NAME").to_string() + " " + env!("CARGO_PKG_VERSION");
         let client = ClientBuilder::new()

@@ -130,7 +130,7 @@ pub enum ResolveErr {
 
 #[derive(Debug, Error)]
 #[error("{inner:?}")]
-struct ResolveErrWrap {
+pub struct ResolveErrWrap {
     inner: ResolveErr,
     _err_tree_pkg: ErrTreePkg,
 }
@@ -161,7 +161,8 @@ impl AsErrTree for ResolveErrWrap {
 }
 
 impl Args {
-    pub async fn resolve(self) -> Result<ResolvedArgs, ResolveErr> {
+    #[tracing::instrument]
+    pub async fn resolve(self) -> Result<ResolvedArgs, ResolveErrWrap> {
         let write_logs = if let Some(path) = self.write_logs {
             Some(File::create(path).await.map_err(ResolveErr::NoLogFile)?)
         } else {

@@ -10,9 +10,10 @@ use std::{
         Arc, Mutex,
     },
     task::{Context, Poll, Waker},
+    time::Duration,
 };
 
-use bare_err_tree::print_tree;
+use bare_err_tree::{err_tree, print_tree, tree_unwrap};
 use clap::Parser;
 
 mod args;
@@ -21,22 +22,34 @@ mod progress;
 use args::Args;
 use futures::{stream::FuturesUnordered, Stream, StreamExt};
 use init::RunState;
+use progress::DlProgress;
 use reqwest::Version;
-use speciam::{dl_and_scrape, DepthLimit, DlAndScrapeErr, LimitedUrl, WriteHandle};
+use speciam::{
+    download, get_response, scrape, DepthLimit, DownloadErrorWrap, LimitedUrl, RobotsCheckStatus,
+    RobotsErrWrap, ScrapeErrorWrap, UniqueUrls, WriteHandle,
+};
+use thiserror::Error;
 use tokio::{
     spawn,
     task::{spawn_blocking, JoinHandle},
+    time::sleep,
 };
 use tracing::{event, Level};
-use url::Url;
+use tracing_error::ErrorLayer;
+use tracing_subscriber::layer::SubscriberExt;
 
 #[cfg(feature = "resume")]
 pub mod resume;
 
 #[tokio::main]
 async fn main() {
-    let args = Args::parse().resolve().await.unwrap();
-    let (pending, run_state) = args.init().await.unwrap();
+    let subscriber = tracing_subscriber::registry().with(ErrorLayer::default());
+
+    // set the subscriber as the default for the application
+    tracing::subscriber::set_global_default(subscriber).unwrap();
+
+    let args = tree_unwrap::<60, _, _, _>(Args::parse().resolve().await);
+    let (pending, run_state) = tree_unwrap::<60, _, _, _>(args.init().await);
     execute(pending, run_state).await;
 }
 
@@ -60,17 +73,83 @@ type CbErr = std::io::Error;
 #[cfg(feature = "resume")]
 type CbErr = async_sqlite::Error;
 
+#[derive(Debug, Error)]
+#[err_tree(ProcessingErrWrap)]
+pub enum ProcessingErr {
+    #[error("failure while making initial request")]
+    Reqwest(#[from] reqwest::Error),
+    #[error("failure while downloading")]
+    Download(#[from] DownloadErrorWrap),
+    #[error("failure while scraping")]
+    Scrape(#[from] ScrapeErrorWrap),
+    #[cfg(feature = "resume")]
+    #[error("logging callback failed")]
+    CB(#[from] async_sqlite::Error),
+}
+
 static PROMPTING: Mutex<()> = Mutex::new(());
 
 fn spawn_process(
     url: LimitedUrl,
     run_state: RunState,
-) -> JoinHandle<Result<ProcessReturn, DlAndScrapeErr<CbErr>>> {
+) -> JoinHandle<Result<ProcessReturn, ProcessingErrWrap>> {
     spawn(async move {
         let domains_check = { run_state.domains.read().await.wait(&url).await };
         match domains_check {
             // Passed the depth check
             Ok(true) => {
+                let (response, unique_urls) = get_response(&run_state.client, url.url().clone())
+                    .await
+                    .map_err(ProcessingErr::from)?;
+                let headers = response.headers().clone();
+
+                let version = response.version();
+                // Wait for resources to free up
+                run_state.thread_limiter.mark(&url, version).await;
+
+                let download_res = download(
+                    response,
+                    run_state.base_path.as_path(),
+                    run_state.progress.as_ref().map(|x| x.write_progress()),
+                )
+                .await;
+                run_state.thread_limiter.unmark(&url, version); // Free the resource
+                let (content, write_handle) = download_res.map_err(ProcessingErr::from)?;
+
+                let scraped: Vec<_> = scrape(url.url(), headers, content)
+                    .await
+                    .map_err(ProcessingErr::from)?;
+
+                let scraped_limited = scraped
+                    .iter()
+                    .flat_map(|scrape| LimitedUrl::new(&url, scrape.clone()))
+                    .collect();
+                let ret = (scraped_limited, Some(write_handle), Some(version));
+
+                // Add unique urls to visit map
+                if let UniqueUrls::Two([_, unique]) = unique_urls {
+                    if let Ok(unique) = LimitedUrl::new(&url, unique) {
+                        if !run_state.config_only {
+                            if let Some(db) = run_state.db.clone() {
+                                db.log_visited(&unique, scraped.clone())
+                                    .map_err(ProcessingErr::from)?;
+                            }
+                        }
+                        run_state.visited.insert(unique, scraped.clone());
+                    }
+                }
+
+                if !run_state.config_only {
+                    if let Some(db) = run_state.db.clone() {
+                        db.log_visited(&url, scraped.clone())
+                            .map_err(ProcessingErr::from)?;
+                    }
+                }
+                run_state.visited.insert(url.clone(), scraped.clone());
+
+                Ok(ProcessReturn::Download((url, ret.0, ret.1, ret.2)))
+
+                /*
                 let res = dl_and_scrape(
                     run_state.client.clone(),
                     run_state.visited,
@@ -113,6 +192,7 @@ fn spawn_process(
                 }
 
                 Ok(res)
+                    */
             }
             // Failed the depth check
             Ok(false) => {
@@ -196,6 +276,7 @@ fn prompt_depth(url: &LimitedUrl, default: DepthLimit) -> DepthLimit {
 ///
 /// Prioritizes the domains with the smallest pending list.
 pub struct Dispatcher {
+    rx: std::sync::mpsc::Receiver<LimitedUrl>,
     pending: HashMap<String, (usize, Vec<LimitedUrl>)>,
     in_flight: Arc<(Mutex<Option<Waker>>, AtomicUsize)>,
     burst: usize,
@@ -204,11 +285,13 @@ pub struct Dispatcher {
 
 impl Dispatcher {
     pub fn new(
+        rx: std::sync::mpsc::Receiver<LimitedUrl>,
         in_flight: Arc<(Mutex<Option<Waker>>, AtomicUsize)>,
         burst: usize,
         parallel_cap: usize,
     ) -> Self {
         Self {
+            rx,
             pending: HashMap::default(),
             in_flight,
             burst,
@@ -231,14 +314,19 @@ impl Stream for Dispatcher {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
 
+        // Update map from rx
+        while let Ok(recv) = this.rx.try_recv() {
+            this.push(recv);
+        }
+
         if this.burst == 0 {
             let mut waker_handle = this.in_flight.0.lock().unwrap();
             if this.in_flight.1.load(Ordering::Acquire) > this.parallel_cap {
                 // Re-check condition after lock
                 if this.in_flight.1.load(Ordering::Acquire) > this.parallel_cap {
                     *waker_handle = Some(cx.waker().clone());
+                    return Poll::Pending;
                 }
-                return Poll::Pending;
             }
 
             this.burst = min(
@@ -262,9 +350,19 @@ impl Stream for Dispatcher {
     }
 }
 
+#[derive(Debug, Error)]
+#[err_tree(RobotsCheckErrWrap)]
+pub enum RobotsCheckErr {
+    #[error("failure while checking robots.txt")]
+    RobotsCheck(#[source] RobotsErrWrap),
+    #[cfg(feature = "resume")]
+    #[error("logging callback failed")]
+    CB(#[source] async_sqlite::Error),
+}
+
 async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
-    let prog_reg = |x: &LimitedUrl| {
-        if let Some(progress) = &run_state.progress {
+    let prog_reg = |x: &LimitedUrl, progress: &Option<DlProgress>| {
+        if let Some(progress) = progress {
             progress.register(x);
         }
     };
@@ -284,19 +382,155 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
         }
     };
 
+    let mut map_handles = FuturesUnordered::new();
+    let mut write_handles = FuturesUnordered::new();
+
+    // NEW STUFF
+    let preprocessing = Arc::new(AtomicUsize::new(0));
+    // Background robots.txt checking
+    let (robot_check_tx, mut robot_passed_rx, robot_check_thread) = {
+        let (robot_check_tx, mut robot_check_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (robot_passed_tx, robot_passed_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let preprocessing = preprocessing.clone();
+        let robots = run_state.robots.clone();
+        let db = run_state.db.clone();
+
+        let robot_check_thread = tokio::spawn(async move {
+            while let Some(url) = robot_check_rx.recv().await {
+                let robots_check_status = robots
+                    .check(&url)
+                    .await
+                    .map_err(RobotsCheckErr::RobotsCheck)?;
+
+                #[cfg(feature = "resume")]
+                if let RobotsCheckStatus::Added((_, robots_txt)) = &robots_check_status {
+                    if !run_state.config_only {
+                        if let Some(db) = db.clone() {
+                            db.log_robots(url.url_base(), robots_txt.as_str())
+                                .map_err(RobotsCheckErr::CB)?;
+                        }
+                    }
+                }
+
+                // Pass on or remove the URL
+                if *robots_check_status {
+                    // Don't increment progress yet, hasn't reached dispatch
+                    robot_passed_tx.send(url).unwrap();
+                } else {
+                    #[cfg(feature = "resume")]
+                    if !run_state.config_only {
+                        if let Some(db) = db.clone() {
+                            db.drop_pending(url.url()).map_err(RobotsCheckErr::CB)?;
+                        }
+                    }
+
+                    // Note that this dropped out of preprocessing
+                    preprocessing.fetch_sub(1, Ordering::Acquire);
+                }
+            }
+            Ok::<_, RobotsCheckErrWrap>(())
+        });
+
+        (robot_check_tx, robot_passed_rx, robot_check_thread)
+    };
+
+    // Background robots.txt checking
+    let (visited_passed_rx, visited_check_thread) = {
+        let (visited_passed_tx, visited_passed_rx) = std::sync::mpsc::channel();
+        let robot_check_tx = robot_check_tx.clone();
+
+        let preprocessing = preprocessing.clone();
+        let visited = run_state.visited.clone();
+        let db = run_state.db.clone();
+        let progress = run_state.progress.clone();
+
+        let visited_check_thread = tokio::spawn(async move {
+            while let Some(url) = robot_passed_rx.recv().await {
+                match visited.probe(url.clone()) {
+                    // Dispatch unique URLs
+                    speciam::VisitCacheRes::Unique => {
+                        // Considered committed to dispatch for progress tracking
+                        prog_reg(&url, &progress);
+
+                        visited_passed_tx.send(url.clone()).unwrap();
+
+                        // Note that this dropped out of preprocessing
+                        preprocessing.fetch_sub(1, Ordering::Acquire);
+                    }
+                    // Push newly pending urls back to robot check stage
+                    speciam::VisitCacheRes::SmallerThanCached(urls) => {
+                        let urls_len = urls.len();
+
+                        // Adjust preprocessing count before submitting, so
+                        // other atomic count adjustments don't underflow.
+                        // Skip a useless 0 add atomic op
+                        if urls_len > 1 {
+                            preprocessing.fetch_add(urls_len - 1, Ordering::Acquire);
+                        }
+
+                        for url in urls {
+                            #[cfg(feature = "resume")]
+                            if !run_state.config_only {
+                                if let Some(db) = db.clone() {
+                                    db.push_pending(url.url())?;
+                                }
+                            }
+
+                            robot_check_tx.send(url).unwrap();
+                        }
+
+                        // URL is fully processed at this point
+                        #[cfg(feature = "resume")]
+                        if !run_state.config_only {
+                            if let Some(db) = db.clone() {
+                                db.drop_pending(url.url())?;
+                            }
+                        }
+
+                        // Need to decrement if children were empty
+                        if urls_len == 0 {
+                            preprocessing.fetch_sub(1, Ordering::Acquire);
+                        }
+                    }
+                    // Discard the URL
+                    speciam::VisitCacheRes::CachedNoRepeat => {
+                        #[cfg(feature = "resume")]
+                        if !run_state.config_only {
+                            if let Some(db) = db.clone() {
+                                db.drop_pending(url.url())?;
+                            }
+                        }
+
+                        // Note that this dropped out of preprocessing
+                        preprocessing.fetch_sub(1, Ordering::Acquire);
+                    }
+                };
+            }
+
+            #[cfg(feature = "resume")]
+            Ok::<_, async_sqlite::Error>(())
+        });
+
+        (visited_passed_rx, visited_check_thread)
+    };
+    // END NEW STUFF
+
     let in_flight = Arc::new((Mutex::default(), AtomicUsize::new(0)));
     let parallel_cap = run_state.thread_limiter.get_limit();
-    let mut dispatcher = Dispatcher::new(in_flight.clone(), pending.len(), parallel_cap);
+    let mut dispatcher = Dispatcher::new(
+        visited_passed_rx,
+        in_flight.clone(),
+        pending.len(),
+        parallel_cap,
+    );
 
     // Initialize process handles with the base urls
     let mut handles = FuturesUnordered::<JoinHandle<Result<ProcessReturn, _>>>::new();
     for initial in pending {
-        prog_reg(&initial);
+        prog_reg(&initial, &run_state.progress);
         dispatcher.push(initial);
     }
-
-    let mut map_handles = FuturesUnordered::new();
-    let mut write_handles = FuturesUnordered::new();
 
     loop {
         tokio::select! {
@@ -324,7 +558,7 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
                                         }
                                     }
 
-                                    prog_reg(&url);
+                                    prog_reg(&url, &run_state.progress);
                                     dispatcher.push(url);
                                 }
                             }
@@ -353,27 +587,52 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
                         waker.wake()
                     }
                 };
-
             }
             // Panic if a write fails
             Some(fin_write) = write_handles.next() => {
-                let (path, write_size) = fin_write.unwrap().unwrap();
+                let (path, write_size) = tree_unwrap::<60, _, _, _>(fin_write.unwrap());
                 prog_free_write(path, write_size);
             }
             Some(fin_map) = map_handles.next() => {
                 dispatcher.push(fin_map.unwrap());
             }
-            // End of scraping, all queues emptied
+            // All processing queues emptied
             else => {
-                // Finished scraping
-                let stats = "FINISHED! STATS TODO";
-                if let Some(progress) = &run_state.progress {
-                    progress.println(stats);
+                if preprocessing.load(Ordering::Acquire) == 0 {
+                    // Finished scraping if preprocessing is also emptied
+                    let stats = "FINISHED! STATS TODO";
+                    if let Some(progress) = &run_state.progress {
+                        progress.println(stats);
+                    } else {
+                        println!("{}", stats);
+                    }
+                    break;
                 } else {
-                    println!("{}", stats);
+                    // If preprocessing isn't emptied, we need to busy loop
+                    // dispatch until it gets one of the preprocessing tasks.
+
+                    // Exit if one of the preprocessing threads crashed
+                    if robot_check_thread.is_finished() || visited_check_thread.is_finished() {
+                        break;
+                    }
+
+                    // Put in a small buffer so preprocessing futures can
+                    // resolve.
+                    sleep(Duration::from_millis(1)).await;
                 }
-                break;
             }
+        }
+    }
+
+    // Catch and unwrap preprocessing thread failure
+    if robot_check_thread.is_finished() {
+        tree_unwrap::<60, _, _, _>(robot_check_thread.await.unwrap());
+    }
+    if visited_check_thread.is_finished() {
+        if let Err(e) = visited_check_thread.await.unwrap() {
+            let mut output = String::new();
+            print_tree::<60, dyn Error, _, _>(&e as &dyn Error, &mut output).unwrap();
+            panic!("{output}");
         }
     }
 
