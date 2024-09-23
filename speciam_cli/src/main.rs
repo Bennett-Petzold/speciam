@@ -1,10 +1,10 @@
 use std::{
     cmp::min,
     collections::HashMap,
-    panic::{self, Location},
+    error::Error,
     path::PathBuf,
     pin::Pin,
-    process::{self, exit},
+    process::exit,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -12,13 +12,13 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
+use bare_err_tree::print_tree;
 use clap::Parser;
 
 mod args;
 mod init;
 mod progress;
 use args::Args;
-use error_stack::Report;
 use futures::{stream::FuturesUnordered, Stream, StreamExt};
 use init::RunState;
 use reqwest::Version;
@@ -37,20 +37,6 @@ pub mod resume;
 
 #[tokio::main]
 async fn main() {
-    error_stack::Report::install_debug_hook::<Location>(|_location, _context| {
-        // Intentionally left empty so nothing will be printed
-        // Temporary hack around not actually propogating backtrace numbers
-        // with stack
-    });
-
-    // Exit when any thread panics
-    let orig_hook = panic::take_hook();
-    panic::set_hook(Box::new(move |panic_info| {
-        // invoke the default handler and exit the process
-        orig_hook(panic_info);
-        process::exit(1);
-    }));
-
     let args = Args::parse().resolve().await.unwrap();
     let (pending, run_state) = args.init().await.unwrap();
     execute(pending, run_state).await;
@@ -321,7 +307,7 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
             }
             Some(next) = handles.next() => {
                 // TODO: actually handle HTTP download errors
-                match next.map_err(Report::new).unwrap() {
+                match next.unwrap() {
                     Ok(next) => match next {
                         ProcessReturn::NoOp(source) => {
                             prog_free(&source, None);
@@ -353,7 +339,11 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
                             map_handles.push(mapping);
                         }
                     }
-                    Err(e) => event!(Level::ERROR, "{:#?}", e),
+                    Err(e) => {
+                        let mut error = String::new();
+                        print_tree::<60, dyn Error, _, _>(&e as &dyn Error, &mut error).unwrap();
+                        event!(Level::ERROR, "{:#?}", error)
+                    },
                 }
 
                 // Update in flight counter, if it goes below parallel cap and

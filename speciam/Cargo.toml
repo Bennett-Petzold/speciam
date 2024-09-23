@@ -23,7 +23,7 @@ once_map = "0.4.19"
 serde = { version = "1", optional = true, features = ["derive"] }
 tracing = { version = "0.1.40", optional = true }
 texting_robots = "0.2"
-bare_err_tree = { version = "0.2.1", path = "../../bare_err_tree/bare_err_tree" }
+bare_err_tree.workspace = true
 
 [dev-dependencies]
 tokio = { version = "*", features = ["macros", "rt-multi-thread"] }

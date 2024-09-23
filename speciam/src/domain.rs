@@ -173,9 +173,9 @@ impl DomainNotMapped {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[err_tree]
-#[derive(Error, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Error)]
 #[error("Duration is zero length")]
 pub struct ZeroLengthDuration {}
 

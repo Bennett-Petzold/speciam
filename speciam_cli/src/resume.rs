@@ -8,6 +8,7 @@ use std::{
 
 use async_sqlite::rusqlite::{self, ErrorCode, Params};
 use async_sqlite::Pool;
+use bare_err_tree::err_tree;
 use reqwest::Url;
 use speciam::{DepthLimit, LimitedUrl, UniqueLimitedUrl, VisitCache};
 use thiserror::Error;
@@ -288,17 +289,23 @@ impl SqliteLogging {
 }
 
 #[derive(Debug, Error)]
+#[err_tree(GenRecoveryErrWrap)]
 pub enum GenRecoveryErr {
+    #[dyn_err]
     #[error("SELECT statement failed")]
     SelectErr(#[from] async_sqlite::Error),
+    #[dyn_err]
     #[error("Database holds an invalid URL")]
     InvalidUrl(#[from] url::ParseError),
 }
 
 #[derive(Debug, Error)]
+#[err_tree(LimitRecoveryErrWrap)]
 pub enum LimitRecoveryErr {
+    #[tree_err]
     #[error("{0:?}")]
-    Gen(#[from] GenRecoveryErr),
+    Gen(#[from] GenRecoveryErrWrap),
+    #[tree_err]
     #[error("{0:?}")]
     NonBase(#[from] speciam::CannotBeABase),
 }
@@ -306,7 +313,7 @@ pub enum LimitRecoveryErr {
 // Recovering existing logs
 impl SqliteLogging {
     /// Return any parsed `robots.txt` from a previous run.
-    pub async fn restore_robots(&self) -> Result<HashMap<String, String>, GenRecoveryErr> {
+    pub async fn restore_robots(&self) -> Result<HashMap<String, String>, GenRecoveryErrWrap> {
         let lines: Vec<(String, String)> = self
             .pool
             .conn(|conn| {
@@ -314,12 +321,13 @@ impl SqliteLogging {
                     .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
                     .collect()
             })
-            .await?;
+            .await
+            .map_err(GenRecoveryErr::from)?;
         Ok(lines.into_iter().collect())
     }
 
     /// Return any visited mappings from a previous run.
-    pub async fn restore_visited(&self) -> Result<VisitCache, LimitRecoveryErr> {
+    pub async fn restore_visited(&self) -> Result<VisitCache, LimitRecoveryErrWrap> {
         // To avoid duplication, visited is split into two tables.
 
         let base_urls_fut = self.pool.conn(|conn| {
@@ -336,7 +344,9 @@ impl SqliteLogging {
         });
 
         let (base_url_map, lines): (HashMap<String, isize>, Vec<(String, String)>) =
-            try_join!(base_urls_fut, lines_fut).map_err(GenRecoveryErr::from)?;
+            try_join!(base_urls_fut, lines_fut).map_err(|x| {
+                LimitRecoveryErr::from(GenRecoveryErrWrap::from(GenRecoveryErr::from(x)))
+            })?;
 
         spawn_blocking(move || {
             let mut end_mapping = HashMap::new();
@@ -344,7 +354,8 @@ impl SqliteLogging {
             let get_base_url = |url: String| {
                 base_url_map.get(&url).map(|depth| {
                     LimitedUrl::at_depth(
-                        Url::from_str(&url).map_err(GenRecoveryErr::from)?,
+                        Url::from_str(&url)
+                            .map_err(|x| GenRecoveryErrWrap::from(GenRecoveryErr::from(x)))?,
                         // Reverse the isize storage transform
                         *depth as usize,
                     )
@@ -362,7 +373,9 @@ impl SqliteLogging {
                 // The previous SQL query must have returned sorted data for
                 // this to work.
                 if base_url_str == cur_url_str {
-                    buffer.push(Url::from_str(&url).map_err(GenRecoveryErr::from)?);
+                    buffer.push(Url::from_str(&url).map_err(|x| {
+                        LimitRecoveryErr::from(GenRecoveryErrWrap::from(GenRecoveryErr::from(x)))
+                    })?);
                 } else {
                     if !buffer.is_empty() {
                         if let Some(cur_url) = cur_url.take() {
@@ -385,7 +398,7 @@ impl SqliteLogging {
     }
 
     /// Return any domain rules from a previous run.
-    pub async fn restore_domains(&self) -> Result<Vec<(Url, DepthLimit)>, GenRecoveryErr> {
+    pub async fn restore_domains(&self) -> Result<Vec<(Url, DepthLimit)>, GenRecoveryErrWrap> {
         let lines: Vec<(String, Option<isize>)> = self
             .pool
             .conn(|conn| {
@@ -393,12 +406,13 @@ impl SqliteLogging {
                     .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
                     .collect()
             })
-            .await?;
+            .await
+            .map_err(GenRecoveryErr::from)?;
         lines
             .into_iter()
             .map(|(url, depth)| {
                 Ok((
-                    Url::from_str(&url)?,
+                    Url::from_str(&url).map_err(GenRecoveryErr::from)?,
                     // Reverse the usize -> isize transform
                     depth.map(|x| x as usize).into(),
                 ))
@@ -407,7 +421,7 @@ impl SqliteLogging {
     }
 
     /// Return the pending url queue from a previous run.
-    pub async fn restore_pending(&self) -> Result<Vec<LimitedUrl>, LimitRecoveryErr> {
+    pub async fn restore_pending(&self) -> Result<Vec<LimitedUrl>, LimitRecoveryErrWrap> {
         // Pending uses visited to avoid stored data duplication, and we
         // take the chance to dedup stored pending requests.
         const PENDING_RESTORE: &str = "
@@ -425,16 +439,21 @@ impl SqliteLogging {
                     .collect()
             })
             .await
-            .map_err(GenRecoveryErr::from)?;
+            .map_err(|x| {
+                LimitRecoveryErr::from(GenRecoveryErrWrap::from(GenRecoveryErr::from(x)))
+            })?;
         lines
             .into_iter()
             .map(|(url, depth)| {
                 LimitedUrl::at_depth(
-                    Url::from_str(&url).map_err(GenRecoveryErr::from)?,
+                    Url::from_str(&url).map_err(|x| {
+                        LimitRecoveryErr::from(GenRecoveryErrWrap::from(GenRecoveryErr::from(x)))
+                    })?,
                     // Reverse the usize -> isize transform
                     depth as usize,
                 )
                 .map_err(LimitRecoveryErr::from)
+                .map_err(LimitRecoveryErrWrap::from)
             })
             .collect()
     }

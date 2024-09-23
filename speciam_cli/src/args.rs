@@ -1,7 +1,10 @@
-use std::{cmp::min, fmt::Debug, path::PathBuf, thread::available_parallelism, time::Duration};
+use std::{
+    cmp::min, error::Error, fmt::Debug, path::PathBuf, thread::available_parallelism,
+    time::Duration,
+};
 
+use bare_err_tree::{err_tree, AsErrTree, ErrTree, ErrTreePkg};
 use clap::Parser;
-use error_stack::Report;
 use reqwest::Url;
 use speciam::{CannotBeABase, DepthLimit, LimitedUrl};
 use thiserror::Error;
@@ -97,12 +100,21 @@ impl Debug for ResolvedArgs {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
+#[err_tree]
+#[derive(Error)]
 #[error("one of the start urls ({url:?}) does not have a valid domain")]
 pub struct InvalidPrimaryDomain {
     #[source]
     source: CannotBeABase,
     url: Url,
+}
+
+impl InvalidPrimaryDomain {
+    #[track_caller]
+    pub fn new(source: CannotBeABase, url: Url) -> Self {
+        Self::_tree(source, url)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -119,8 +131,54 @@ pub enum ResolveErr {
     SqliteInit(#[source] async_sqlite::Error),
 }
 
+#[derive(Debug, Error)]
+#[error("{inner:?}")]
+struct ResolveErrWrap {
+    inner: ResolveErr,
+    _err_tree_pkg: ErrTreePkg,
+}
+
+impl From<ResolveErr> for ResolveErrWrap {
+    #[track_caller]
+    fn from(inner: ResolveErr) -> Self {
+        Self {
+            inner,
+            _err_tree_pkg: ErrTreePkg::new(),
+        }
+    }
+}
+
+impl AsErrTree for ResolveErrWrap {
+    fn as_err_tree(&self, func: &mut dyn FnMut(bare_err_tree::ErrTree<'_>)) {
+        match &self.inner {
+            ResolveErr::InvalidPrimaryDomain(x) => (func)(ErrTree::with_pkg(
+                &self.inner,
+                &[&[x as &dyn AsErrTree]],
+                self._err_tree_pkg.clone(),
+            )),
+            ResolveErr::NoLogFile(x) => (func)(ErrTree::with_pkg(
+                &self.inner,
+                &[&[&(x as &dyn Error) as &dyn AsErrTree]],
+                self._err_tree_pkg.clone(),
+            )),
+            #[cfg(feature = "resume")]
+            ResolveErr::SqliteOpen(x) => (func)(ErrTree::with_pkg(
+                &self.inner,
+                &[&[&(x as &dyn Error) as &dyn AsErrTree]],
+                self._err_tree_pkg.clone(),
+            )),
+            #[cfg(feature = "resume")]
+            ResolveErr::SqliteInit(x) => (func)(ErrTree::with_pkg(
+                &self.inner,
+                &[&[&(x as &dyn Error) as &dyn AsErrTree]],
+                self._err_tree_pkg.clone(),
+            )),
+        }
+    }
+}
+
 impl Args {
-    pub async fn resolve(self) -> Result<ResolvedArgs, Report<ResolveErr>> {
+    pub async fn resolve(self) -> Result<ResolvedArgs, ResolveErr> {
         let write_logs = if let Some(path) = self.write_logs {
             Some(File::create(path).await.map_err(ResolveErr::NoLogFile)?)
         } else {
@@ -132,7 +190,7 @@ impl Args {
             .into_iter()
             .map(|url| {
                 LimitedUrl::origin(url.clone()).map_err(|source| {
-                    ResolveErr::InvalidPrimaryDomain(InvalidPrimaryDomain { source, url })
+                    ResolveErr::InvalidPrimaryDomain(InvalidPrimaryDomain::new(source, url))
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;

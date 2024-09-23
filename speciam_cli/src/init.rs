@@ -1,6 +1,6 @@
 use std::{env::current_dir, path::PathBuf, sync::Arc};
 
-use error_stack::Report;
+use bare_err_tree::{AsErrTree, ErrTree, ErrTreePkg};
 use reqwest::{Client, ClientBuilder};
 use speciam::{
     CannotBeABase, DepthLimit, Domains, LimitedUrl, RobotsCheck, ThreadLimiter, VisitCache,
@@ -21,10 +21,60 @@ pub enum InitErr {
     InvalidDelay(#[source] ZeroLengthDuration),
     #[cfg(feature = "resume")]
     #[error("{0:?}")]
-    GenRecoveryErr(#[from] crate::resume::GenRecoveryErr),
+    GenRecoveryErr(#[from] crate::resume::GenRecoveryErrWrap),
     #[cfg(feature = "resume")]
     #[error("{0:?}")]
-    LimitRecoveryErr(#[from] crate::resume::LimitRecoveryErr),
+    LimitRecoveryErr(#[from] crate::resume::LimitRecoveryErrWrap),
+}
+
+#[derive(Debug)]
+pub struct InitErrWrap {
+    inner: InitErr,
+    _err_tree_pkg: ErrTreePkg,
+}
+
+impl From<InitErr> for InitErrWrap {
+    #[track_caller]
+    fn from(inner: InitErr) -> Self {
+        Self {
+            inner,
+            _err_tree_pkg: ErrTreePkg::new(),
+        }
+    }
+}
+
+impl AsErrTree for InitErrWrap {
+    fn as_err_tree(&self, func: &mut dyn FnMut(bare_err_tree::ErrTree<'_>)) {
+        match &self.inner {
+            InitErr::ClientBuild(x) => (func)(ErrTree::with_pkg(
+                &self.inner,
+                &[&[&(x as &dyn std::error::Error) as &dyn AsErrTree]],
+                self._err_tree_pkg.clone(),
+            )),
+            InitErr::InvalidDir(x) => (func)(ErrTree::with_pkg(
+                &self.inner,
+                &[&[&(x as &dyn std::error::Error) as &dyn AsErrTree]],
+                self._err_tree_pkg.clone(),
+            )),
+            InitErr::InvalidDelay(x) => (func)(ErrTree::with_pkg(
+                &self.inner,
+                &[&[x as &dyn AsErrTree]],
+                self._err_tree_pkg.clone(),
+            )),
+            #[cfg(feature = "resume")]
+            InitErr::GenRecoveryErr(x) => (func)(ErrTree::with_pkg(
+                &self.inner,
+                &[&[x as &dyn AsErrTree]],
+                self._err_tree_pkg.clone(),
+            )),
+            #[cfg(feature = "resume")]
+            InitErr::LimitRecoveryErr(x) => (func)(ErrTree::with_pkg(
+                &self.inner,
+                &[&[x as &dyn AsErrTree]],
+                self._err_tree_pkg.clone(),
+            )),
+        }
+    }
 }
 
 /// Accumulation of all configured and restored state.
@@ -49,7 +99,7 @@ pub struct RunState {
 }
 
 impl ResolvedArgs {
-    pub async fn init(mut self) -> Result<(Vec<LimitedUrl>, RunState), Report<InitErr>> {
+    pub async fn init(mut self) -> Result<(Vec<LimitedUrl>, RunState), InitErrWrap> {
         let user_agent = env!("CARGO_PKG_NAME").to_string() + " " + env!("CARGO_PKG_VERSION");
         let client = ClientBuilder::new()
             .use_rustls_tls()
@@ -76,48 +126,65 @@ impl ResolvedArgs {
 
         #[cfg(feature = "resume")]
         let (visited, robots, mut pending) = if let Some(db) = db.clone() {
-            let (visited, robots, pending, domain_lines_res) =
-                if self.config_only {
-                    let domain_lines_fut =
-                        tokio::spawn(
-                            async move { db.restore_domains().await.map_err(InitErr::from) },
-                        );
-                    let (visited, robots, pending) = no_db();
-                    (visited, robots, pending, domain_lines_fut.await.unwrap())
-                } else {
-                    let db_clone = db.clone();
-                    let visited_fut = tokio::spawn(async move {
-                        db_clone.restore_visited().await.map_err(InitErr::from)
-                    });
+            let (visited, robots, pending, domain_lines_res) = if self.config_only {
+                let domain_lines_fut = tokio::spawn(async move {
+                    db.restore_domains()
+                        .await
+                        .map_err(InitErr::from)
+                        .map_err(InitErrWrap::from)
+                });
+                let (visited, robots, pending) = no_db();
+                (visited, robots, pending, domain_lines_fut.await.unwrap())
+            } else {
+                let db_clone = db.clone();
+                let visited_fut = tokio::spawn(async move {
+                    db_clone
+                        .restore_visited()
+                        .await
+                        .map_err(InitErr::from)
+                        .map_err(InitErrWrap::from)
+                });
 
-                    let db_clone = db.clone();
-                    let robots_fut = tokio::spawn(async move {
-                        db_clone.restore_robots().await.map_err(InitErr::from)
-                    });
+                let db_clone = db.clone();
+                let robots_fut = tokio::spawn(async move {
+                    db_clone
+                        .restore_robots()
+                        .await
+                        .map_err(InitErr::from)
+                        .map_err(InitErrWrap::from)
+                });
 
-                    let db_clone = db.clone();
-                    let domain_lines_fut = tokio::spawn(async move {
-                        db_clone.restore_domains().await.map_err(InitErr::from)
-                    });
+                let db_clone = db.clone();
+                let domain_lines_fut = tokio::spawn(async move {
+                    db_clone
+                        .restore_domains()
+                        .await
+                        .map_err(InitErr::from)
+                        .map_err(InitErrWrap::from)
+                });
 
-                    let db_clone = db.clone();
-                    let pending_fut = tokio::spawn(async move {
-                        db_clone.restore_pending().await.map_err(InitErr::from)
-                    });
+                let db_clone = db.clone();
+                let pending_fut = tokio::spawn(async move {
+                    db_clone
+                        .restore_pending()
+                        .await
+                        .map_err(InitErr::from)
+                        .map_err(InitErrWrap::from)
+                });
 
-                    let (visited, robots, domain_lines_res, pending) =
-                        try_join!(visited_fut, robots_fut, domain_lines_fut, pending_fut).unwrap();
+                let (visited, robots, domain_lines_res, pending) =
+                    try_join!(visited_fut, robots_fut, domain_lines_fut, pending_fut).unwrap();
 
-                    let visited = Arc::new(visited?);
-                    let robots = Arc::new(RobotsCheck::with_database(
-                        client.clone(),
-                        visited.clone(),
-                        user_agent,
-                        robots?,
-                    ));
+                let visited = Arc::new(visited?);
+                let robots = Arc::new(RobotsCheck::with_database(
+                    client.clone(),
+                    visited.clone(),
+                    user_agent,
+                    robots?,
+                ));
 
-                    (visited, robots, pending?, domain_lines_res)
-                };
+                (visited, robots, pending?, domain_lines_res)
+            };
 
             domain_lines_res?
                 .into_iter()

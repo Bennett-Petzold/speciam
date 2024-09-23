@@ -1,3 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["speciam", "speciam_cli"]
+
+[workspace.dependencies]
+bare_err_tree = { version = "0.2.1", path = "../bare_err_tree/bare_err_tree" }

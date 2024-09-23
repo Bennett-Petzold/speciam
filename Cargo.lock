@@ -1839,9 +1839,9 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "async-sqlite",
+ "bare_err_tree",
  "clap",
  "console",
- "error-stack",
  "futures",
  "indicatif",
  "once_map",
