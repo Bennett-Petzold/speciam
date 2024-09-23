@@ -1,22 +1,21 @@
 use std::{
     borrow::Borrow,
-    io::ErrorKind,
+    fs::{self, create_dir_all, File},
+    io::{ErrorKind, Write},
     iter::FusedIterator,
     path::{Path, PathBuf},
-    sync::{atomic::AtomicU64, Arc},
+    sync::{
+        atomic::AtomicU64,
+        mpsc::{self, SendError},
+        Arc,
+    },
 };
 
 use bare_err_tree::err_tree;
 use bytes::Bytes;
 use reqwest::{Client, Response, Url};
 use thiserror::Error;
-use tokio::{
-    fs::{self, create_dir_all, File},
-    io::AsyncWriteExt,
-    spawn,
-    sync::mpsc::{self, error::SendError},
-    task::JoinHandle,
-};
+use tokio::task::{spawn_blocking, JoinHandle};
 
 use crate::add_index;
 
@@ -209,9 +208,9 @@ where
         };
 
         // Tokio's mpsc guarantees read out in the same order as write in
-        let (tx, mut rx) = mpsc::unbounded_channel::<Bytes>();
+        let (tx, rx) = mpsc::channel::<Bytes>();
         let dest_clone = dest.clone();
-        let write_thread = spawn(async move {
+        let write_thread = spawn_blocking(move || {
             let dest = dest_clone;
 
             // Temporarily relocate when directory name == non-directory item
@@ -221,7 +220,7 @@ where
                     parent_temp.push("_");
                     let parent_temp = PathBuf::from(parent_temp);
 
-                    let _ = fs::rename(parent, &parent_temp).await;
+                    let _ = fs::rename(parent, &parent_temp);
                     let post_locate = parent.join(parent.file_name().unwrap());
 
                     Some((parent_temp, post_locate))
@@ -236,12 +235,11 @@ where
             let _ = create_dir_all(dest.parent().ok_or(WriteError::PathCreate(FileErr::new(
                 dest.clone(),
                 ErrorKind::NotFound.into(),
-            )))?)
-            .await;
+            )))?);
 
             // Move conflicting names into final location
             if let Some((temp, index)) = path_pairs {
-                let _ = fs::rename(temp, index).await;
+                let _ = fs::rename(temp, index);
             }
 
             let dest_noconflict = if dest.is_dir() {
@@ -251,12 +249,11 @@ where
             };
 
             let mut dest_file = File::create(&dest_noconflict)
-                .await
                 .map_err(|e| WriteError::FileOpen(FileErr::new(dest_noconflict.clone(), e)))?;
 
             let mut write_counter = 0;
             // Write out all the chunks as provided.
-            while let Some(chunk) = rx.recv().await {
+            while let Ok(chunk) = rx.recv() {
                 write_counter += chunk.len() as u64;
 
                 if let Some(write_updates) = &write_updates {
@@ -264,13 +261,9 @@ where
                         .fetch_add(chunk.len() as u64, std::sync::atomic::Ordering::Release);
                 };
 
-                dest_file
-                    .write_all(&chunk)
-                    .await
-                    .map_err(WriteError::Write)?;
+                dest_file.write_all(&chunk).map_err(WriteError::Write)?;
             }
-            dest_file.flush().await.map_err(WriteError::Write)?;
-            dest_file.shutdown().await.map_err(WriteError::Write)?;
+            dest_file.flush().map_err(WriteError::Write)?;
             Ok((dest, write_counter))
         });
         let write_handle = WriteHandle {
