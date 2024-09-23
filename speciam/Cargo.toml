@@ -11,8 +11,6 @@ tracing = ["dep:tracing"]
 reqwest = { version = "0.12", features = ["stream"] }
 tokio = { version = "1", features = ["fs"] }
 governor = "0.6"
-robotstxt = "0.3"
-error-stack = "0.5"
 thiserror = "1"
 select = "0.6"
 url = "2"

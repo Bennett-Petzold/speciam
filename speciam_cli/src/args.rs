@@ -117,7 +117,7 @@ impl InvalidPrimaryDomain {
 #[derive(Debug, Error)]
 pub enum ResolveErr {
     #[error("{0:?}")]
-    InvalidPrimaryDomain(#[from] InvalidPrimaryDomain),
+    InvalidPrimaryDomain(#[source] Box<InvalidPrimaryDomain>),
     #[error("failed to create a logfile")]
     NoLogFile(#[from] std::io::Error),
     #[cfg(feature = "resume")]
@@ -148,7 +148,9 @@ impl From<ResolveErr> for ResolveErrWrap {
 impl AsErrTree for ResolveErrWrap {
     fn as_err_tree(&self, func: &mut dyn FnMut(bare_err_tree::ErrTree<'_>)) {
         match &self.inner {
-            ResolveErr::InvalidPrimaryDomain(x) => tree!(func, self.inner, self._err_tree_pkg, x),
+            ResolveErr::InvalidPrimaryDomain(x) => {
+                tree!(func, self.inner, self._err_tree_pkg, x.as_ref())
+            }
             ResolveErr::NoLogFile(x) => tree!(dyn, func, self.inner, self._err_tree_pkg, x),
             #[cfg(feature = "resume")]
             ResolveErr::SqliteOpen(x) => tree!(dyn, func, self.inner, self._err_tree_pkg, x),
@@ -171,7 +173,7 @@ impl Args {
             .into_iter()
             .map(|url| {
                 LimitedUrl::origin(url.clone()).map_err(|source| {
-                    ResolveErr::InvalidPrimaryDomain(InvalidPrimaryDomain::new(source, url))
+                    ResolveErr::InvalidPrimaryDomain(InvalidPrimaryDomain::new(source, url).into())
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;

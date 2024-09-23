@@ -10,9 +10,8 @@ resume = ["dep:async-sqlite"]
 tracing = ["speciam/tracing", "dep:tracing-subscriber"]
 
 [dependencies]
-async-channel = "2.3.1"
 async-sqlite = { version = "0.3.1", optional = true, default-features = false }
-bare_err_tree.workspace = true
+bare_err_tree = { workspace = true, features = ["source_line", "tracing"] }
 clap = { version = "4.5.11", features = ["derive"] }
 console = "0.15.8"
 futures = "0.3.30"
