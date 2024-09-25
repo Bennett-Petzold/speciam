@@ -67,12 +67,6 @@ enum ProcessReturn {
     MappingDomain(JoinHandle<LimitedUrl>),
 }
 
-// Placeholder when not using callbacks
-#[cfg(not(feature = "resume"))]
-type CbErr = std::io::Error;
-#[cfg(feature = "resume")]
-type CbErr = async_sqlite::Error;
-
 #[derive(Debug, Error)]
 #[err_tree(ProcessingErrWrap)]
 pub enum ProcessingErr {
@@ -147,52 +141,12 @@ fn spawn_process(
                 }
                 run_state.visited.insert(url.clone(), scraped.clone());
 
-                Ok(ProcessReturn::Download((url, ret.0, ret.1, ret.2)))
-
-                /*
-                let res = dl_and_scrape(
-                    run_state.client.clone(),
-                    run_state.visited,
-                    run_state.robots,
-                    run_state.base_path,
-                    run_state.thread_limiter,
-                    url.clone(),
-                    #[cfg(feature = "resume")]
-                    |url: &str, body: &String| {
-                        if !run_state.config_only {
-                            if let Some(db) = run_state.db.clone() {
-                                db.log_robots(url, body.as_str())?;
-                            }
-                        }
-                        Ok::<_, async_sqlite::Error>(())
-                    },
-                    #[cfg(not(feature = "resume"))]
-                    |_, _| Ok(()),
-                    #[cfg(feature = "resume")]
-                    |parent: &LimitedUrl, children: Vec<Url>| {
-                        if !run_state.config_only {
-                            if let Some(db) = run_state.db.clone() {
-                                db.log_visited(parent, children)?;
-                            }
-                        }
-                        Ok(())
-                    },
-                    #[cfg(not(feature = "resume"))]
-                    |_, _| Ok(()),
-                    run_state.progress.map(|x| x.write_progress()),
-                )
-                .await
-                .map(|(x, y, z)| ProcessReturn::Download((url.clone(), x, y, z)))?;
-
-                #[cfg(feature = "resume")]
-                if !run_state.config_only {
-                    if let Some(db) = &run_state.db {
-                        db.drop_pending(url.url()).unwrap();
-                    }
-                }
-
-                Ok(res)
-                    */
+                Ok(ProcessReturn::Download((
+                    url,
+                    ret.0,
+                    ret.1.flatten(),
+                    ret.2,
+                )))
             }
             // Failed the depth check
             Ok(false) => {
@@ -241,7 +195,7 @@ fn spawn_process(
 
                     #[cfg(feature = "resume")]
                     if let Some(db) = run_state.db {
-                        let _ = db.log_domain(url.url_base(), depth.into());
+                        let _ = db.log_domain(url.url().as_str(), depth.into());
                     }
 
                     url
@@ -330,8 +284,9 @@ impl Stream for Dispatcher {
             }
 
             this.burst = min(
+                //this.pending.values().map(|x| x.1.len()).sum(),
                 this.pending.values().filter(|x| !x.1.is_empty()).count(),
-                this.parallel_cap * this.parallel_cap,
+                this.parallel_cap.saturating_mul(this.parallel_cap),
             );
             if this.burst == 0 {
                 return Poll::Ready(None);
@@ -426,7 +381,7 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
                     }
 
                     // Note that this dropped out of preprocessing
-                    preprocessing.fetch_sub(1, Ordering::Acquire);
+                    preprocessing.fetch_sub(1, Ordering::Release);
                 }
             }
             Ok::<_, RobotsCheckErrWrap>(())
@@ -456,7 +411,7 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
                         visited_passed_tx.send(url.clone()).unwrap();
 
                         // Note that this dropped out of preprocessing
-                        preprocessing.fetch_sub(1, Ordering::Acquire);
+                        preprocessing.fetch_sub(1, Ordering::Release);
                     }
                     // Push newly pending urls back to robot check stage
                     speciam::VisitCacheRes::SmallerThanCached(urls) => {
@@ -466,7 +421,7 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
                         // other atomic count adjustments don't underflow.
                         // Skip a useless 0 add atomic op
                         if urls_len > 1 {
-                            preprocessing.fetch_add(urls_len - 1, Ordering::Acquire);
+                            preprocessing.fetch_add(urls_len - 1, Ordering::Release);
                         }
 
                         for url in urls {
@@ -490,7 +445,7 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
 
                         // Need to decrement if children were empty
                         if urls_len == 0 {
-                            preprocessing.fetch_sub(1, Ordering::Acquire);
+                            preprocessing.fetch_sub(1, Ordering::Release);
                         }
                     }
                     // Discard the URL
@@ -503,7 +458,7 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
                         }
 
                         // Note that this dropped out of preprocessing
-                        preprocessing.fetch_sub(1, Ordering::Acquire);
+                        preprocessing.fetch_sub(1, Ordering::Release);
                     }
                 };
             }
@@ -545,22 +500,21 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
                         ProcessReturn::NoOp(source) => {
                             prog_free(&source, None);
                         },
-                        ProcessReturn::Download((source, scrape, wh, ver)) => {
+                        ProcessReturn::Download((source, mut scrape, wh, ver)) => {
                             prog_free(&source, ver);
+                            scrape.retain(|x| (source.url_base() == x.url_base()) || run_state.primary_domains.contains(&source.url_base().to_string()));
 
+                            preprocessing.fetch_add(scrape.len(), Ordering::Release);
                             for url in scrape {
-                                if source.url_base() == url.url_base() ||
-                                    run_state.primary_domains.contains(&source.url_base().to_string()) {
-                                    #[cfg(feature = "resume")]
-                                    if !run_state.config_only {
-                                        if let Some(db) = &run_state.db {
-                                            db.push_pending(url.url()).unwrap();
-                                        }
+                                #[cfg(feature = "resume")]
+                                if !run_state.config_only {
+                                    if let Some(db) = &run_state.db {
+                                        db.push_pending(url.url()).unwrap();
                                     }
-
-                                    prog_reg(&url, &run_state.progress);
-                                    dispatcher.push(url);
                                 }
+
+                                prog_reg(&url, &run_state.progress);
+                                robot_check_tx.send(url).unwrap();
                             }
 
                             if let Some(h) = wh {
@@ -599,6 +553,7 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
             // All processing queues emptied
             else => {
                 if preprocessing.load(Ordering::Acquire) == 0 {
+                    println!("STATUS: {}", in_flight.1.load(Ordering::Acquire));
                     // Finished scraping if preprocessing is also emptied
                     let stats = "FINISHED! STATS TODO";
                     if let Some(progress) = &run_state.progress {

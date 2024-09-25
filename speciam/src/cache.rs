@@ -42,6 +42,11 @@ impl UniqueLimitedUrl {
     pub fn smaller_depth(&self, rhs: &Self) -> bool {
         self.0.depth() < rhs.0.depth()
     }
+
+    /// Test if this has an equal depth to `rhs`.
+    pub fn eq_depth(&self, rhs: &Self) -> bool {
+        self.0.depth() == rhs.0.depth()
+    }
 }
 
 /// Stores a cache of visited [`LimitedUrl`] values and their scraped urls.
@@ -84,28 +89,20 @@ impl VisitCache {
     /// Check the status of `url` against the cache.
     pub fn probe(&self, url: LimitedUrl) -> VisitCacheRes {
         let url = url.into();
-        let cache_handle = self.0.read().unwrap();
-        if let Some((stored_url, cache_entry)) = cache_handle.get_key_value(&url) {
-            if url.smaller_depth(stored_url) {
-                // Clone and drop; avoids holding lock during processing
-                let cache_entry = cache_entry.clone();
-                drop(cache_handle);
 
-                // Set depths appropriately
-                let ret_cache = cache_entry
-                    .clone()
-                    .into_iter()
-                    .flat_map(|entry| LimitedUrl::new(&url.0, entry))
-                    .collect();
+        let update = |url: UniqueLimitedUrl| {
+            // Checks need to be repeated, in case the entry was updated
+            // between dropping and read lock and now.
+            let mut mut_handle = self.0.write().unwrap();
+            if let Some((stored_url, cache_entry)) = mut_handle.get_key_value(&url) {
+                if url.smaller_depth(stored_url) {
+                    let cache_entry = cache_entry.clone();
+                    let ret_cache = cache_entry
+                        .clone()
+                        .into_iter()
+                        .flat_map(|entry| LimitedUrl::new(&url.0, entry))
+                        .collect();
 
-                // Checks need to be repeated, in case the entry was updated
-                // between dropping and read lock and now.
-                let mut mut_handle = self.0.write().unwrap();
-                if mut_handle
-                    .get_key_value(&url)
-                    .map(|(stored_url, _)| url.smaller_depth(stored_url))
-                    == Some(true)
-                {
                     mut_handle.remove_entry(&url);
                     mut_handle.insert(url, cache_entry);
                     VisitCacheRes::SmallerThanCached(ret_cache)
@@ -113,11 +110,21 @@ impl VisitCache {
                     VisitCacheRes::CachedNoRepeat
                 }
             } else {
-                VisitCacheRes::CachedNoRepeat
+                mut_handle.insert(url, vec![]);
+                VisitCacheRes::Unique
             }
-        } else {
-            VisitCacheRes::Unique
+        };
+
+        // Scoped for handle drop
+        {
+            if let Some((stored_url, _)) = self.0.read().unwrap().get_key_value(&url) {
+                if !url.smaller_depth(stored_url) {
+                    return VisitCacheRes::CachedNoRepeat;
+                }
+            };
         }
+
+        update(url)
     }
 
     /// Add `url` to the cache if unique or smaller than the current entry.
@@ -127,7 +134,14 @@ impl VisitCache {
 
         let compare = mut_handle
             .get_key_value(&url)
-            .map(|(stored_url, _)| url.smaller_depth(stored_url));
+            .map(|(stored_url, contained)| {
+                if url.smaller_depth(stored_url) {
+                    true
+                } else {
+                    // Catch the empty init case
+                    url.eq_depth(stored_url) && contained.is_empty()
+                }
+            });
 
         if compare == Some(true) {
             mut_handle.remove_entry(&url);

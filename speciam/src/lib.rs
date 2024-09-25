@@ -167,7 +167,7 @@ where
                     .iter()
                     .flat_map(|scrape| LimitedUrl::new(&url, scrape.clone()))
                     .collect();
-                let ret = Ok((scraped_limited, Some(write_handle), Some(version)));
+                let ret = Ok((scraped_limited, write_handle, Some(version)));
 
                 // Add unique urls to visit map
                 if let UniqueUrls::Two([_, unique]) = unique_urls {

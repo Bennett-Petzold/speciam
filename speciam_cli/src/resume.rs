@@ -289,25 +289,42 @@ impl SqliteLogging {
     }
 }
 
+#[derive(Debug)]
+#[err_tree]
+#[derive(Error)]
+#[error("Database holds an invalid URL: {url:?}")]
+pub struct UrlParseErr {
+    url: String,
+    #[source]
+    err: url::ParseError,
+}
+
+impl UrlParseErr {
+    #[track_caller]
+    pub fn new(url: String, err: url::ParseError) -> Self {
+        Self::_tree(url, err)
+    }
+}
+
 #[derive(Debug, Error)]
 #[err_tree(GenRecoveryErrWrap)]
 pub enum GenRecoveryErr {
     #[dyn_err]
     #[error("SELECT statement failed")]
     SelectErr(#[from] async_sqlite::Error),
-    #[dyn_err]
-    #[error("Database holds an invalid URL")]
-    InvalidUrl(#[from] url::ParseError),
+    #[tree_err]
+    #[error(transparent)]
+    InvalidUrl(#[from] UrlParseErr),
 }
 
 #[derive(Debug, Error)]
 #[err_tree(LimitRecoveryErrWrap)]
 pub enum LimitRecoveryErr {
     #[tree_err]
-    #[error("{0:?}")]
+    #[error(transparent)]
     Gen(#[from] GenRecoveryErrWrap),
     #[tree_err]
-    #[error("{0:?}")]
+    #[error(transparent)]
     NonBase(#[from] speciam::CannotBeABase),
 }
 
@@ -361,8 +378,12 @@ impl SqliteLogging {
             let get_base_url = |url: String| {
                 base_url_map.get(&url).map(|depth| {
                     LimitedUrl::at_depth(
-                        Url::from_str(&url)
-                            .map_err(|x| GenRecoveryErrWrap::from(GenRecoveryErr::from(x)))?,
+                        Url::from_str(&url).map_err(|x| {
+                            GenRecoveryErrWrap::from(GenRecoveryErr::from(UrlParseErr::new(
+                                url.clone(),
+                                x,
+                            )))
+                        })?,
                         // Reverse the isize storage transform
                         *depth as usize,
                     )
@@ -381,7 +402,9 @@ impl SqliteLogging {
                 // this to work.
                 if base_url_str == cur_url_str {
                     buffer.push(Url::from_str(&url).map_err(|x| {
-                        LimitRecoveryErr::from(GenRecoveryErrWrap::from(GenRecoveryErr::from(x)))
+                        LimitRecoveryErr::from(GenRecoveryErrWrap::from(GenRecoveryErr::from(
+                            UrlParseErr::new(url, x),
+                        )))
                     })?);
                 } else {
                     if !buffer.is_empty() {
@@ -419,7 +442,8 @@ impl SqliteLogging {
             .into_iter()
             .map(|(url, depth)| {
                 Ok((
-                    Url::from_str(&url).map_err(GenRecoveryErr::from)?,
+                    Url::from_str(&url)
+                        .map_err(|x| GenRecoveryErr::from(UrlParseErr::new(url, x)))?,
                     // Reverse the usize -> isize transform
                     depth.map(|x| x as usize).into(),
                 ))
@@ -454,7 +478,9 @@ impl SqliteLogging {
             .map(|(url, depth)| {
                 LimitedUrl::at_depth(
                     Url::from_str(&url).map_err(|x| {
-                        LimitRecoveryErr::from(GenRecoveryErrWrap::from(GenRecoveryErr::from(x)))
+                        LimitRecoveryErr::from(GenRecoveryErrWrap::from(GenRecoveryErr::from(
+                            UrlParseErr::new(url, x),
+                        )))
                     })?,
                     // Reverse the usize -> isize transform
                     depth as usize,

@@ -203,7 +203,7 @@ impl ResolvedArgs {
                 secondary_depth: self.secondary_depth,
                 primary_domains: self.primary_domains.into(),
                 interactive: !self.no_prompt,
-                progress: self.bars.then_some(DlProgress::new()),
+                progress: self.bars.then(|| DlProgress::new()),
                 #[cfg(feature = "resume")]
                 db,
                 #[cfg(feature = "resume")]

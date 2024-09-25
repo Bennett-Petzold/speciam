@@ -7,7 +7,7 @@ use std::{
     sync::{
         atomic::AtomicU64,
         mpsc::{self, SendError},
-        Arc,
+        Arc, Mutex,
     },
 };
 
@@ -193,7 +193,7 @@ pub async fn download<P>(
     mut response: Response,
     base_path: P,
     write_updates: Option<Arc<AtomicU64>>,
-) -> Result<(Vec<u8>, WriteHandle), DownloadErrorWrap>
+) -> Result<(Vec<u8>, Option<WriteHandle>), DownloadErrorWrap>
 where
     P: Borrow<Path>,
 {
@@ -248,8 +248,17 @@ where
                 dest.clone()
             };
 
-            let mut dest_file = File::create(&dest_noconflict)
-                .map_err(|e| WriteError::FileOpen(FileErr::new(dest_noconflict.clone(), e)))?;
+            let mut dest_file = match File::create_new(&dest_noconflict) {
+                Ok(dest_file) => dest_file,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Ok((dest, 0));
+                }
+                Err(e) => {
+                    return Err(
+                        WriteError::FileOpen(FileErr::new(dest_noconflict.clone(), e)).into(),
+                    )
+                }
+            };
 
             let mut write_counter = 0;
             // Write out all the chunks as provided.
@@ -277,15 +286,15 @@ where
         while let Some(chunk) = response.chunk().await.map_err(DownloadError::Reqwest)? {
             content.extend_from_slice(&chunk);
             if let Err(e) = tx.send(chunk) {
-                return Err(DownloadError::LostWriter(LostWriter::new(
-                    e,
-                    write_handle.handle.await.unwrap().unwrap_err(),
-                ))
-                .into());
+                if let Err(handle_err) = write_handle.handle.await.unwrap() {
+                    return Err(DownloadError::LostWriter(LostWriter::new(e, handle_err)).into());
+                } else {
+                    return Ok((content, None));
+                }
             }
         }
 
-        Ok((content, write_handle))
+        Ok((content, Some(write_handle)))
     } else {
         Err(DownloadError::NoDomain(url).into())
     }
@@ -309,6 +318,6 @@ mod tests {
 
         let (content, write_thread) = download(homepage_response, temp_path, None).await.unwrap();
         assert!(!content.is_empty());
-        write_thread.handle.await.unwrap().unwrap();
+        write_thread.unwrap().handle.await.unwrap().unwrap();
     }
 }
