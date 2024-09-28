@@ -114,12 +114,6 @@ fn spawn_process(
                     .await
                     .map_err(ProcessingErr::from)?;
 
-                let scraped_limited = scraped
-                    .iter()
-                    .flat_map(|scrape| LimitedUrl::new(&url, scrape.clone()))
-                    .collect();
-                let ret = (scraped_limited, Some(write_handle), Some(version));
-
                 // Add unique urls to visit map
                 if let UniqueUrls::Two([_, unique]) = unique_urls {
                     if let Ok(unique) = LimitedUrl::new(&url, unique) {
@@ -142,10 +136,10 @@ fn spawn_process(
                 run_state.visited.insert(url.clone(), scraped.clone());
 
                 Ok(ProcessReturn::Download((
-                    url,
-                    ret.0,
-                    ret.1.flatten(),
-                    ret.2,
+                    url.clone(),
+                    run_state.visited.get(url).unwrap(),
+                    write_handle,
+                    Some(version),
                 )))
             }
             // Failed the depth check
@@ -553,7 +547,6 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
             // All processing queues emptied
             else => {
                 if preprocessing.load(Ordering::Acquire) == 0 {
-                    println!("STATUS: {}", in_flight.1.load(Ordering::Acquire));
                     // Finished scraping if preprocessing is also emptied
                     let stats = "FINISHED! STATS TODO";
                     if let Some(progress) = &run_state.progress {
