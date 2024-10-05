@@ -3,7 +3,10 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Condvar, Mutex,
+    },
 };
 
 use async_sqlite::rusqlite::{self, ErrorCode, Params};
@@ -47,7 +50,7 @@ impl<E: Send + 'static> From<JoinHandle<Result<(), E>>> for FusedJoinHandle<E> {
 
 struct UpdateHandle<T> {
     tx: UnboundedSender<T>,
-    handle: FusedJoinHandle<async_sqlite::Error>,
+    handle: FusedJoinHandle<Arc<async_sqlite::Error>>,
 }
 
 fn sqlite_retry<F, T>(mut func: F) -> Result<T, rusqlite::Error>
@@ -72,7 +75,11 @@ where
 }
 
 impl<T> UpdateHandle<T> {
-    pub fn new(pool: Pool, prepared_stmt: &'static str) -> UpdateHandle<T>
+    pub fn new(
+        pool: Pool,
+        prepared_stmt: &'static str,
+        pending_handle: Arc<(AtomicUsize, Mutex<Option<Arc<async_sqlite::Error>>>)>,
+    ) -> UpdateHandle<T>
     where
         T: Params + Send + Debug + Clone + 'static,
     {
@@ -85,7 +92,8 @@ impl<T> UpdateHandle<T> {
             while rx.recv_many(&mut buffer, usize::MAX).await > 0 {
                 // Clears up these lines from the buffer
                 let lines = std::mem::take(&mut buffer);
-                pool_clone
+                let lines_len = lines.len();
+                let res = pool_clone
                     .conn(|conn| {
                         let mut stmt = sqlite_retry(|| conn.prepare_cached(prepared_stmt))?;
                         for arg in lines {
@@ -93,7 +101,15 @@ impl<T> UpdateHandle<T> {
                         }
                         Ok(())
                     })
-                    .await?;
+                    .await;
+
+                if let Err(e) = res {
+                    let e = Arc::new(e);
+                    *pending_handle.1.lock().unwrap() = Some(e.clone());
+                    return Err(e);
+                } else {
+                    pending_handle.0.fetch_sub(lines_len, Ordering::Release);
+                }
             }
             Ok(())
         });
@@ -108,7 +124,7 @@ impl<T> UpdateHandle<T> {
     ///
     /// Returns the error code, if one occured. A non-error return only
     /// occurs when [`self`] itself drops.
-    pub fn send(&self, val: T) -> Result<&Self, async_sqlite::Error> {
+    pub fn send(&self, val: T) -> Result<&Self, Arc<async_sqlite::Error>> {
         if let Some(end) = self.handle.check() {
             end?
         }
@@ -129,6 +145,7 @@ pub struct SqliteLogging {
     domains_nolimit: UpdateHandle<[String; 1]>,
     push_pending: UpdateHandle<[String; 1]>,
     drop_pending: UpdateHandle<[String; 1]>,
+    pending_ops: Arc<(AtomicUsize, Mutex<Option<Arc<async_sqlite::Error>>>)>,
 }
 
 const CREATE_ROBOTS: &str = "
@@ -183,19 +200,23 @@ DELETE FROM pending;
 impl TryFrom<Pool> for SqliteLogging {
     type Error = async_sqlite::Error;
     fn try_from(pool: Pool) -> Result<Self, Self::Error> {
+        let pending_ops = Arc::new((AtomicUsize::new(0), Mutex::default()));
+
         pool.conn_blocking(|conn| sqlite_retry(|| conn.execute(CREATE_ROBOTS, [])))?;
         pool.conn_blocking(|conn| sqlite_retry(|| conn.execute(CREATE_VISITED_DEPTHS, [])))?;
         pool.conn_blocking(|conn| sqlite_retry(|| conn.execute(CREATE_VISITED, [])))?;
         pool.conn_blocking(|conn| sqlite_retry(|| conn.execute(CREATE_DOMAINS, [])))?;
         pool.conn_blocking(|conn| sqlite_retry(|| conn.execute(CREATE_PENDING, [])))?;
 
-        let robots = UpdateHandle::new(pool.clone(), UPDATE_ROBOTS);
-        let visited_depths = UpdateHandle::new(pool.clone(), UPDATE_VISITED_DEPTHS);
-        let visited = UpdateHandle::new(pool.clone(), UPDATE_VISITED);
-        let domains = UpdateHandle::new(pool.clone(), UPDATE_DOMAINS);
-        let domains_nolimit = UpdateHandle::new(pool.clone(), UPDATE_DOMAINS_NOLIMIT);
-        let push_pending = UpdateHandle::new(pool.clone(), PUSH_PENDING);
-        let drop_pending = UpdateHandle::new(pool.clone(), DROP_PENDING_URL);
+        let robots = UpdateHandle::new(pool.clone(), UPDATE_ROBOTS, pending_ops.clone());
+        let visited_depths =
+            UpdateHandle::new(pool.clone(), UPDATE_VISITED_DEPTHS, pending_ops.clone());
+        let visited = UpdateHandle::new(pool.clone(), UPDATE_VISITED, pending_ops.clone());
+        let domains = UpdateHandle::new(pool.clone(), UPDATE_DOMAINS, pending_ops.clone());
+        let domains_nolimit =
+            UpdateHandle::new(pool.clone(), UPDATE_DOMAINS_NOLIMIT, pending_ops.clone());
+        let push_pending = UpdateHandle::new(pool.clone(), PUSH_PENDING, pending_ops.clone());
+        let drop_pending = UpdateHandle::new(pool.clone(), DROP_PENDING_URL, pending_ops.clone());
 
         Ok(Self {
             pool,
@@ -206,6 +227,7 @@ impl TryFrom<Pool> for SqliteLogging {
             domains_nolimit,
             push_pending,
             drop_pending,
+            pending_ops,
         })
     }
 }
@@ -217,7 +239,8 @@ impl SqliteLogging {
         &self,
         url: U,
         body: S,
-    ) -> Result<&Self, async_sqlite::Error> {
+    ) -> Result<&Self, Arc<async_sqlite::Error>> {
+        self.pending_ops.0.fetch_add(1, Ordering::Release);
         self.robots
             .send((url.borrow().to_string(), body.borrow().to_string()))
             .map(|_| self)
@@ -228,7 +251,8 @@ impl SqliteLogging {
         &self,
         parent: U,
         children: L,
-    ) -> Result<&Self, async_sqlite::Error> {
+    ) -> Result<&Self, Arc<async_sqlite::Error>> {
+        self.pending_ops.0.fetch_add(1, Ordering::Release);
         let parent = parent.borrow();
         let parent_url = parent.url().to_string();
 
@@ -251,7 +275,8 @@ impl SqliteLogging {
         &self,
         url: U,
         depth: Option<usize>,
-    ) -> Result<&Self, async_sqlite::Error> {
+    ) -> Result<&Self, Arc<async_sqlite::Error>> {
+        self.pending_ops.0.fetch_add(1, Ordering::Release);
         if let Some(depth) = depth {
             self.domains.send((
                 url.borrow().to_string(),
@@ -267,14 +292,22 @@ impl SqliteLogging {
     }
 
     /// Log a pending URL.
-    pub fn push_pending<U: Borrow<Url>>(&self, pending: U) -> Result<&Self, async_sqlite::Error> {
+    pub fn push_pending<U: Borrow<Url>>(
+        &self,
+        pending: U,
+    ) -> Result<&Self, Arc<async_sqlite::Error>> {
+        self.pending_ops.0.fetch_add(1, Ordering::Release);
         self.push_pending
             .send([pending.borrow().to_string()])
             .map(|_| self)
     }
 
     /// Remove a URL from the pending list.
-    pub fn drop_pending<U: Borrow<Url>>(&self, pending: U) -> Result<&Self, async_sqlite::Error> {
+    pub fn drop_pending<U: Borrow<Url>>(
+        &self,
+        pending: U,
+    ) -> Result<&Self, Arc<async_sqlite::Error>> {
+        self.pending_ops.0.fetch_add(1, Ordering::Release);
         self.drop_pending
             .send([pending.borrow().to_string()])
             .map(|_| self)
@@ -282,10 +315,20 @@ impl SqliteLogging {
 
     /// Drop all saved state.
     pub async fn drop_state(&self) -> Result<&Self, async_sqlite::Error> {
+        self.pending_ops.0.fetch_add(1, Ordering::Release);
+        let pending_ops_clone = self.pending_ops.clone();
         self.pool
-            .conn(|conn| conn.execute(DROP_STATE, []))
+            .conn(move |conn| {
+                let res = conn.execute(DROP_STATE, []);
+                pending_ops_clone.0.fetch_sub(1, Ordering::Release);
+                res
+            })
             .await
             .map(|_| self)
+    }
+
+    pub fn pending_ops(&self) -> Arc<(AtomicUsize, Mutex<Option<Arc<async_sqlite::Error>>>)> {
+        self.pending_ops.clone()
     }
 }
 

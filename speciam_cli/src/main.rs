@@ -110,7 +110,7 @@ pub enum ProcessingErr {
     Scrape(#[from] ScrapeErrorWrap),
     #[cfg(feature = "resume")]
     #[error("logging callback failed")]
-    CB(#[from] async_sqlite::Error),
+    CB(#[from] Arc<async_sqlite::Error>),
 }
 
 static PROMPTING: Mutex<()> = Mutex::new(());
@@ -371,7 +371,7 @@ pub enum RobotsCheckErr {
     RobotsCheck(#[source] RobotsErrWrap),
     #[cfg(feature = "resume")]
     #[error("logging callback failed")]
-    CB(#[source] async_sqlite::Error),
+    CB(#[source] Arc<async_sqlite::Error>),
 }
 
 #[derive(Debug)]
@@ -541,7 +541,7 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
             }
 
             #[cfg(feature = "resume")]
-            Ok::<_, async_sqlite::Error>(())
+            Ok::<_, Arc<async_sqlite::Error>>(())
         });
 
         (visited_passed_rx, visited_check_thread)
@@ -709,6 +709,37 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
             let mut output = String::new();
             print_tree::<60, dyn Error, _, _>(&e as &dyn Error, &mut output).unwrap();
             panic!("{output}");
+        }
+    }
+
+    #[cfg(feature = "resume")]
+    if let Some(db) = run_state.db {
+        let pending_ops = db.pending_ops();
+
+        let current_pending_ops = pending_ops.0.load(Ordering::Acquire);
+
+        if current_pending_ops != 0 {
+            let num_db_ops_pending = format!(
+                "Waiting for {} resume database transactions to complete...",
+                current_pending_ops
+            );
+            if let Some(progress) = &run_state.progress {
+                progress.println(num_db_ops_pending);
+            } else {
+                println!("{}", num_db_ops_pending);
+            }
+
+            while pending_ops.0.load(Ordering::Acquire) != 0 {
+                let mut err_handle = pending_ops.1.lock().unwrap();
+                if let Some(e) = err_handle.take() {
+                    let mut output = String::new();
+                    print_tree::<60, dyn Error, _, _>(&e as &dyn Error, &mut output).unwrap();
+                    panic!("{output}");
+                } else {
+                    drop(err_handle);
+                    sleep(Duration::from_millis(1)).await;
+                }
+            }
         }
     }
 
