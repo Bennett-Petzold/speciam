@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
-        Arc, Mutex, RwLock,
+        Arc, Mutex, RwLock, RwLockReadGuard,
     },
     time::Duration,
 };
@@ -320,30 +320,47 @@ impl DlProgress {
         self.total.inc(1);
 
         let base = url.borrow().url_base();
-        let read_handle = self.per_domain.read().unwrap();
-        let bar = read_handle.get(base).unwrap();
-        bar.inc(1);
-        if bar.update_ver(version) {
-            bar.update_style(self.columns, *self.before_bar.read().unwrap());
-        }
 
-        // Un-hide a bar, if possible
-        if bar.is_hidden()
-            && (self.count.load(Ordering::Acquire) < DOMAIN_LINE_LIMIT
-                || read_handle.values().any(Self::empty_target))
-        {
-            drop(read_handle);
-
-            let mut write_handle = self.per_domain.write().unwrap();
-            if let Some(empty_bar) = write_handle.values().find(|b| Self::empty_target(b)) {
-                // Hide the empty other bar
-                empty_bar.set_draw_target(ProgressDrawTarget::hidden());
-
-                // Make bar visible again
-                let bar = write_handle.get_mut(base).unwrap();
-                bar.bar = self.multi.add(bar.bar.clone());
-                bar.tick()
+        let free_logic = |bar: ProgBarVer, read_handle: RwLockReadGuard<HashMap<_, _>>| {
+            bar.inc(1);
+            if bar.update_ver(version) {
+                bar.update_style(self.columns, *self.before_bar.read().unwrap());
             }
+
+            // Un-hide a bar, if possible
+            if bar.is_hidden()
+                && (self.count.load(Ordering::Acquire) < DOMAIN_LINE_LIMIT
+                    || read_handle.values().any(Self::empty_target))
+            {
+                drop(read_handle);
+
+                let mut write_handle = self.per_domain.write().unwrap();
+                if let Some(empty_bar) = write_handle.values().find(|b| Self::empty_target(b)) {
+                    // Hide the empty other bar
+                    empty_bar.set_draw_target(ProgressDrawTarget::hidden());
+
+                    // Make bar visible again
+                    let bar = write_handle.get_mut(base).unwrap();
+                    bar.bar = self.multi.add(bar.bar.clone());
+                    bar.tick()
+                }
+            }
+        };
+
+        let read_handle = self.per_domain.read().unwrap();
+        if let Some(bar) = read_handle.get(base) {
+            free_logic(bar.clone(), read_handle);
+        } else {
+            drop(read_handle);
+            let mut write_handle = self.per_domain.write().unwrap();
+            if !write_handle.contains_key(base) {
+                let bar = ProgBarVer::new(base.to_string(), self.columns, 0);
+                write_handle.insert(base.to_string(), bar);
+            }
+            drop(write_handle);
+
+            let read_handle = self.per_domain.read().unwrap();
+            free_logic(read_handle.get(base).unwrap().clone(), read_handle);
         }
     }
 

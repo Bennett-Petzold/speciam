@@ -158,6 +158,14 @@ impl VisitCache {
             })
     }
 
+    pub fn get_nonlimited(&self, url: LimitedUrl) -> Option<Vec<Url>> {
+        self.0
+            .read()
+            .unwrap()
+            .get(&url.into())
+            .and_then(|vec| vec.clone())
+    }
+
     pub fn inner(&self) -> HashMap<UniqueLimitedUrl, Option<Vec<Url>>> {
         (*self.0.read().unwrap()).clone()
     }

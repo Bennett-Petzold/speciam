@@ -6,6 +6,7 @@ edition = "2021"
 [features]
 serde = ["dep:serde"]
 tracing = ["dep:tracing"]
+file_renaming = ["dep:uuid"]
 
 [dependencies]
 reqwest = { version = "0.12", features = ["stream"] }
@@ -16,12 +17,13 @@ select = "0.6"
 url = "2"
 bytes = "1.7"
 futures = "0.3"
-once_map = "0.4.19"
+once_map = "0.4"
 
 serde = { version = "1", optional = true, features = ["derive"] }
-tracing = { version = "0.1.40", optional = true }
+tracing = { version = "0.1", optional = true }
 texting_robots = "0.2"
 bare_err_tree.workspace = true
+uuid = { version = "1", optional = true, features = ["v4"] }
 
 [dev-dependencies]
 tokio = { version = "*", features = ["macros", "rt-multi-thread"] }

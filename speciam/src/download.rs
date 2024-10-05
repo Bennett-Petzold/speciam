@@ -17,6 +17,9 @@ use reqwest::{Client, Response, Url};
 use thiserror::Error;
 use tokio::task::{spawn_blocking, JoinHandle};
 
+#[cfg(feature = "file_renaming")]
+use uuid::Uuid;
+
 use crate::add_index;
 
 /// All unique [`Url`]s.
@@ -79,7 +82,12 @@ pub async fn get_response<C>(client: C, url: Url) -> Result<(Response, UniqueUrl
 where
     C: Borrow<Client>,
 {
-    let page_response = client.borrow().get(url.clone()).send().await?;
+    let page_response = client
+        .borrow()
+        .get(url.clone())
+        .send()
+        .await?
+        .error_for_status()?;
 
     // Return unique urls.
     let new_url = add_index(&page_response);
@@ -96,10 +104,10 @@ where
 #[derive(Error)]
 #[error("File: {file:?}")]
 pub struct FileErr {
-    file: PathBuf,
+    pub file: PathBuf,
     #[dyn_err]
     #[source]
-    source: std::io::Error,
+    pub source: std::io::Error,
 }
 
 impl FileErr {
@@ -116,8 +124,11 @@ pub enum WriteError {
     #[error("failed to create the path")]
     #[tree_err]
     PathCreate(#[source] FileErr),
-    #[error("failed to open the file for writing")]
+    #[error("tried to create duplicate file")]
     #[tree_err]
+    DupFile(#[source] FileErr),
+    #[tree_err]
+    #[error("failed to open the file for writing")]
     FileOpen(#[source] FileErr),
     #[error("failed during write")]
     #[dyn_err]
@@ -130,7 +141,7 @@ pub enum WriteError {
 /// Errors are not recoverable.
 #[derive(Debug)]
 pub struct WriteHandle {
-    pub handle: JoinHandle<Result<(PathBuf, u64), WriteErrorWrap>>,
+    pub handle: JoinHandle<Result<(Option<PathBuf>, u64), WriteErrorWrap>>,
     pub size_prediction: Option<u64>,
     pub target: PathBuf,
 }
@@ -144,7 +155,7 @@ pub struct LostWriter {
     send_err: SendError<Bytes>,
     #[tree_err]
     #[source]
-    handle_err: WriteErrorWrap,
+    pub handle_err: WriteErrorWrap,
 }
 
 impl LostWriter {
@@ -206,11 +217,19 @@ where
                 dest.push(part);
             }
         };
+        if let Some(url_query) = url.query() {
+            dest.push(url_query);
+        };
+        if let Some(url_fragment) = url.fragment() {
+            dest.push(url_fragment);
+        };
 
-        // Tokio's mpsc guarantees read out in the same order as write in
+        // stdlib's mpsc guarantees read out in the same order as write in
         let (tx, rx) = mpsc::channel::<Bytes>();
+        let base_path_clone = base_path.borrow().to_path_buf();
         let dest_clone = dest.clone();
         let write_thread = spawn_blocking(move || {
+            let base_path = base_path_clone;
             let dest = dest_clone;
 
             // Temporarily relocate when directory name == non-directory item
@@ -243,15 +262,29 @@ where
             }
 
             let dest_noconflict = if dest.is_dir() {
+                let _ = create_dir_all(&dest);
                 dest.join(dest.file_name().unwrap())
             } else {
                 dest.clone()
             };
 
+            let mut alt_output_path = None;
+
             let mut dest_file = match File::create_new(&dest_noconflict) {
                 Ok(dest_file) => dest_file,
+                // Filename too long on UNIX
+                #[cfg(all(target_family = "unix", feature = "file_renaming"))]
+                Err(e) if e.raw_os_error() == Some(36) => {
+                    alt_output_path = Some(base_path.join(Uuid::new_v4().to_string()));
+                    File::create_new(alt_output_path.as_ref().unwrap()).map_err(|e| {
+                        WriteError::FileOpen(FileErr::new(alt_output_path.clone().unwrap(), e))
+                    })?
+                }
+
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    return Ok((dest, 0));
+                    return Err(
+                        WriteError::DupFile(FileErr::new(dest_noconflict.clone(), e)).into(),
+                    )
                 }
                 Err(e) => {
                     return Err(
@@ -273,7 +306,7 @@ where
                 dest_file.write_all(&chunk).map_err(WriteError::Write)?;
             }
             dest_file.flush().map_err(WriteError::Write)?;
-            Ok((dest, write_counter))
+            Ok((alt_output_path, write_counter))
         });
         let write_handle = WriteHandle {
             handle: write_thread,

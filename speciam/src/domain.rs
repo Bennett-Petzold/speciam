@@ -62,6 +62,16 @@ impl LimitedUrl {
         Ok(Self { url, depth })
     }
 
+    /// Construct with copied depth from [`self`].
+    ///
+    /// `url` must be resolvable to a domain.
+    pub fn aliased(&self, url: Url) -> Self {
+        Self {
+            url,
+            depth: self.depth,
+        }
+    }
+
     /// Construct a URL at some `depth`.
     ///
     /// `url` must be resolvable to some domain.
@@ -103,6 +113,12 @@ impl LimitedUrl {
             0
         };
 
+        self
+    }
+
+    /// Replace the wrapped [`Url`] value.
+    pub fn replace_url(&mut self, url: Url) -> &mut Self {
+        self.url = url;
         self
     }
 }

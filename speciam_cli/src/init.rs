@@ -1,4 +1,9 @@
-use std::{env::current_dir, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashSet,
+    env::current_dir,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use bare_err_tree::{tree, AsErrTree, ErrTreePkg};
 use reqwest::{Client, ClientBuilder};
@@ -70,6 +75,7 @@ pub struct RunState {
     pub thread_limiter: Arc<ThreadLimiter>,
     pub secondary_depth: DepthLimit,
     pub primary_domains: Box<[String]>,
+    pub download_targets: Arc<Mutex<HashSet<String>>>,
     pub interactive: bool,
     pub progress: Option<DlProgress>,
     #[cfg(feature = "resume")]
@@ -202,6 +208,7 @@ impl ResolvedArgs {
                 thread_limiter: Arc::new(ThreadLimiter::new(self.units)),
                 secondary_depth: self.secondary_depth,
                 primary_domains: self.primary_domains.into(),
+                download_targets: Arc::default(),
                 interactive: !self.no_prompt,
                 progress: self.bars.then(|| DlProgress::new()),
                 #[cfg(feature = "resume")]
