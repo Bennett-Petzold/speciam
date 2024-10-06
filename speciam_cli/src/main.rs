@@ -12,6 +12,7 @@ use std::{
         Arc, Mutex,
     },
     task::{Context, Poll, Waker},
+    thread::available_parallelism,
     time::Duration,
 };
 
@@ -54,6 +55,20 @@ pub mod resume;
 
 #[tokio::main]
 async fn main() {
+    let args = Args::parse();
+
+    /*
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        // New runtime has the set number of threads
+        .worker_threads(
+            args.units
+                .unwrap_or(available_parallelism().unwrap().into()),
+        )
+        .build()
+        .unwrap()
+        .block_on(async {
+    */
     let subscriber = tracing_subscriber::registry()
         .with(ErrorLayer::default())
         .with(
@@ -69,6 +84,9 @@ async fn main() {
                 .with_filter(filter::LevelFilter::from_level(Level::INFO)),
         );
 
+    #[cfg(feature = "tokio_console")]
+    let subscriber = subscriber.with(console_subscriber::spawn());
+
     // set the subscriber as the default for the application
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
@@ -80,9 +98,12 @@ async fn main() {
         exit(1);
     }));
 
-    let args = tree_unwrap::<60, _, _, _>(Args::parse().resolve().await);
+    let args = tree_unwrap::<60, _, _, _>(args.resolve().await);
     let (pending, run_state) = tree_unwrap::<60, _, _, _>(args.init().await);
-    execute(pending, run_state).await;
+    execute(pending, run_state).await
+    /*
+    });
+            */
 }
 
 #[derive(Debug)]
@@ -392,7 +413,7 @@ impl<T, U: Clone + Unpin> Future for HandleWithPayload<T, U> {
     }
 }
 
-async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
+async fn execute(pending: Vec<LimitedUrl>, mut run_state: RunState) {
     let prog_reg = |x: &LimitedUrl, progress: &Option<DlProgress>| {
         if let Some(progress) = progress {
             progress.register(x);
@@ -712,32 +733,34 @@ async fn execute(pending: Vec<LimitedUrl>, run_state: RunState) {
         }
     }
 
-    #[cfg(feature = "resume")]
     if let Some(db) = run_state.db {
         let pending_ops = db.pending_ops();
 
-        let current_pending_ops = pending_ops.0.load(Ordering::Acquire);
+        let mut current_pending_ops = pending_ops.0.load(Ordering::Acquire);
 
         if current_pending_ops != 0 {
             let num_db_ops_pending = format!(
                 "Waiting for {} resume database transactions to complete...",
                 current_pending_ops
             );
-            if let Some(progress) = &run_state.progress {
+            if let Some(progress) = &mut run_state.progress {
                 progress.println(num_db_ops_pending);
+                progress.init_transactions(current_pending_ops as u64);
             } else {
                 println!("{}", num_db_ops_pending);
             }
 
             while pending_ops.0.load(Ordering::Acquire) != 0 {
-                let mut err_handle = pending_ops.1.lock().unwrap();
-                if let Some(e) = err_handle.take() {
+                if let Some(e) = pending_ops.1.lock().unwrap().take() {
                     let mut output = String::new();
                     print_tree::<60, dyn Error, _, _>(&e as &dyn Error, &mut output).unwrap();
                     panic!("{output}");
-                } else {
-                    drop(err_handle);
-                    sleep(Duration::from_millis(1)).await;
+                };
+                sleep(Duration::from_secs(1)).await;
+
+                current_pending_ops = pending_ops.0.load(Ordering::Acquire);
+                if let Some(progress) = &run_state.progress {
+                    progress.update_transactions(current_pending_ops as u64);
                 }
             }
         }

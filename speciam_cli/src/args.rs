@@ -7,6 +7,8 @@ use speciam::{CannotBeABase, DepthLimit, LimitedUrl};
 use thiserror::Error;
 use tokio::fs::File;
 
+use crate::resume::AsyncSqliteTracedError;
+
 #[derive(Debug, Parser)]
 #[command(version, about)]
 pub struct Args {
@@ -36,7 +38,7 @@ pub struct Args {
     write_logs: Option<PathBuf>,
     /// Cap on parallel downloads. Defaults to number of cores.
     #[arg(short, long)]
-    units: Option<usize>,
+    pub units: Option<usize>,
     #[cfg(feature = "resume")]
     /// Write to/resume from session saved to this sqlite database.
     #[arg(short, long)]
@@ -125,7 +127,7 @@ pub enum ResolveErr {
     SqliteOpen(#[source] async_sqlite::Error),
     #[cfg(feature = "resume")]
     #[error("failed to initialize sqlite database")]
-    SqliteInit(#[source] async_sqlite::Error),
+    SqliteInit(#[source] AsyncSqliteTracedError),
 }
 
 #[derive(Debug, Error)]
@@ -155,7 +157,7 @@ impl AsErrTree for ResolveErrWrap {
             #[cfg(feature = "resume")]
             ResolveErr::SqliteOpen(x) => tree!(dyn, func, self.inner, self._err_tree_pkg, x),
             #[cfg(feature = "resume")]
-            ResolveErr::SqliteInit(x) => tree!(dyn, func, self.inner, self._err_tree_pkg, x),
+            ResolveErr::SqliteInit(x) => tree!(func, self.inner, self._err_tree_pkg, x),
         }
     }
 }

@@ -8,12 +8,14 @@ vendored = ["reqwest/native-tls-vendored", "async-sqlite?/bundled"]
 compression = ["reqwest/brotli", "reqwest/deflate", "reqwest/gzip", "reqwest/zstd"]
 resume = ["dep:async-sqlite"]
 tracing = ["speciam/tracing", "dep:tracing-subscriber"]
+tokio_console = ["dep:console-subscriber"]
 
 [dependencies]
 async-sqlite = { version = "0.3.1", optional = true, default-features = false }
 bare_err_tree = { workspace = true, features = ["source_line", "tracing"] }
 clap = { version = "4.5.11", features = ["derive"] }
 console = "0.15.8"
+console-subscriber = { version = "0.4.0", optional = true }
 futures = "0.3.30"
 indicatif = "0.17.8"
 once_map = "0.4.19"

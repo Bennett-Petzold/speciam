@@ -126,6 +126,8 @@ impl DerefMut for ProgBarVer {
 pub struct DlProgress {
     multi: MultiProgress,
     total: ProgressBar,
+    #[cfg(feature = "resume")]
+    transactions: Option<ProgressBar>,
     total_predicts: Arc<Mutex<HashMap<PathBuf, u64>>>,
     write: ProgressBar,
     write_progress: Arc<AtomicU64>,
@@ -201,6 +203,8 @@ impl DlProgress {
         Self {
             multi,
             total,
+            #[cfg(feature = "resume")]
+            transactions: None,
             total_predicts: Arc::default(),
             write,
             write_progress,
@@ -384,6 +388,49 @@ impl DlProgress {
                 }
                 cmp::Ordering::Equal => (),
             }
+        }
+    }
+
+    #[cfg(feature = "resume")]
+    pub fn init_transactions(&mut self, cur_count: u64) {
+        let transactions = ProgressBar::new(cur_count);
+        transactions.set_style(
+            ProgressStyle::with_template(
+                &(Style::new()
+                    .bold()
+                    .apply_to("SQLite trailing transactions: ")
+                    .to_string()
+                    + &Style::new()
+                        .green()
+                        .apply_to("[{elapsed_precise}]")
+                        .to_string()
+                    + " [{wide_bar:.red/8}] {pos}/{len} "
+                    + &Style::new()
+                        .magenta()
+                        .apply_to("[{eta_precise}]")
+                        .to_string()
+                    + "     "),
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+        );
+        self.multi.insert(0, transactions.clone());
+        self.transactions = Some(transactions);
+
+        // Clear out all this tracking information
+        self.multi.remove(&self.total);
+        self.multi.remove(&self.write);
+        self.per_domain
+            .read()
+            .unwrap()
+            .values()
+            .for_each(|v| self.multi.remove(&v.bar));
+    }
+
+    #[cfg(feature = "resume")]
+    pub fn update_transactions(&self, cur_count: u64) {
+        if let Some(transactions) = &self.transactions {
+            transactions.set_position(transactions.length().unwrap_or(0) - cur_count);
         }
     }
 }

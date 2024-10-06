@@ -1,7 +1,7 @@
 use std::{
     borrow::Borrow,
     collections::HashMap,
-    fmt::Debug,
+    fmt::{Debug, Display, Formatter},
     str::FromStr,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -9,7 +9,7 @@ use std::{
     },
 };
 
-use async_sqlite::rusqlite::{self, ErrorCode, Params};
+use async_sqlite::rusqlite::{self, ErrorCode, Params, TransactionBehavior};
 use async_sqlite::Pool;
 use bare_err_tree::err_tree;
 use reqwest::Url;
@@ -22,6 +22,7 @@ use tokio::{
     task::{spawn_blocking, JoinHandle},
     try_join,
 };
+use tracing::{event, Level};
 
 struct FusedJoinHandle<E> {
     output: Arc<Mutex<Option<Result<(), E>>>>,
@@ -63,8 +64,12 @@ where
                 return Ok(x);
             }
             Err(rusqlite::Error::SqliteFailure(e, desc)) => match e.code {
-                ErrorCode::DatabaseBusy => (),
-                ErrorCode::DatabaseLocked => (),
+                ErrorCode::DatabaseBusy => {
+                    event!(Level::WARN, "SQLite connection busy");
+                }
+                ErrorCode::DatabaseLocked => {
+                    event!(Level::WARN, "SQLite connection locked");
+                }
                 _ => return Err(rusqlite::Error::SqliteFailure(e, desc)),
             },
             Err(e) => {
@@ -94,12 +99,15 @@ impl<T> UpdateHandle<T> {
                 let lines = std::mem::take(&mut buffer);
                 let lines_len = lines.len();
                 let res = pool_clone
-                    .conn(|conn| {
-                        let mut stmt = sqlite_retry(|| conn.prepare_cached(prepared_stmt))?;
+                    .conn_mut(move |conn| {
+                        let transaction =
+                            conn.transaction_with_behavior(TransactionBehavior::Exclusive)?;
+                        let mut stmt = sqlite_retry(|| transaction.prepare_cached(prepared_stmt))?;
                         for arg in lines {
                             sqlite_retry(|| stmt.execute(arg.clone()))?;
                         }
-                        Ok(())
+                        drop(stmt);
+                        transaction.commit()
                     })
                     .await;
 
@@ -197,8 +205,25 @@ DELETE FROM visited;
 DELETE FROM pending;
 ";
 
+#[derive(Debug, Error)]
+#[err_tree]
+pub struct AsyncSqliteTracedError(#[source] async_sqlite::Error);
+
+impl Display for AsyncSqliteTracedError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        <async_sqlite::Error as Display>::fmt(&self.0, f)
+    }
+}
+
+impl From<async_sqlite::Error> for AsyncSqliteTracedError {
+    #[track_caller]
+    fn from(value: async_sqlite::Error) -> Self {
+        Self::_tree(value)
+    }
+}
+
 impl TryFrom<Pool> for SqliteLogging {
-    type Error = async_sqlite::Error;
+    type Error = AsyncSqliteTracedError;
     fn try_from(pool: Pool) -> Result<Self, Self::Error> {
         let pending_ops = Arc::new((AtomicUsize::new(0), Mutex::default()));
 
@@ -252,10 +277,10 @@ impl SqliteLogging {
         parent: U,
         children: L,
     ) -> Result<&Self, Arc<async_sqlite::Error>> {
-        self.pending_ops.0.fetch_add(1, Ordering::Release);
         let parent = parent.borrow();
         let parent_url = parent.url().to_string();
 
+        self.pending_ops.0.fetch_add(1, Ordering::Release);
         self.visited_depths.send((
             parent_url.clone(),
             // Casts usize as isize for storage.
@@ -263,9 +288,14 @@ impl SqliteLogging {
             parent.depth() as isize,
         ))?;
 
+        let mut num_children = 0;
         for child in children.into_iter() {
+            num_children += 1;
             self.visited.send((parent_url.clone(), child.to_string()))?;
         }
+        self.pending_ops
+            .0
+            .fetch_add(num_children, Ordering::Release);
 
         Ok(self)
     }
@@ -381,9 +411,11 @@ impl SqliteLogging {
         let lines: Vec<(String, String)> = self
             .pool
             .conn(|conn| {
-                conn.prepare("SELECT url, body FROM robots;")?
-                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                    .collect()
+                sqlite_retry(|| {
+                    conn.prepare("SELECT url, body FROM robots;")?
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                        .collect()
+                })
             })
             .await
             .map_err(GenRecoveryErr::from)?;
@@ -398,16 +430,20 @@ impl SqliteLogging {
         // To avoid duplication, visited is split into two tables.
 
         let base_urls_fut = self.pool.conn(|conn| {
-            conn.prepare("SELECT base_url, depth FROM visited_depths")?
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect()
+            sqlite_retry(|| {
+                conn.prepare("SELECT base_url, depth FROM visited_depths")?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect()
+            })
         });
 
         let lines_fut = self.pool.conn(|conn| {
             // Sorting for consecutive base_url runs is critical for later logic
-            conn.prepare("SELECT base_url, url FROM visited ORDER BY base_url")?
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect()
+            sqlite_retry(|| {
+                conn.prepare("SELECT base_url, url FROM visited ORDER BY base_url")?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect()
+            })
         });
 
         let (base_url_map, lines): (HashMap<String, isize>, Vec<(String, String)>) =
@@ -475,9 +511,11 @@ impl SqliteLogging {
         let lines: Vec<(String, Option<isize>)> = self
             .pool
             .conn(|conn| {
-                conn.prepare("SELECT url, depth FROM domains;")?
-                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                    .collect()
+                sqlite_retry(|| {
+                    conn.prepare("SELECT url, depth FROM domains;")?
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                        .collect()
+                })
             })
             .await
             .map_err(GenRecoveryErr::from)?;
@@ -508,9 +546,11 @@ impl SqliteLogging {
         let lines: Vec<(String, isize)> = self
             .pool
             .conn(|conn| {
-                conn.prepare(PENDING_RESTORE)?
-                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                    .collect()
+                sqlite_retry(|| {
+                    conn.prepare(PENDING_RESTORE)?
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                        .collect()
+                })
             })
             .await
             .map_err(|x| {
