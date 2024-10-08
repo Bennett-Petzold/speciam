@@ -3,9 +3,11 @@ use std::{
     env::current_dir,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use bare_err_tree::{tree, AsErrTree, ErrTreePkg};
+use governor::{DefaultKeyedRateLimiter, Jitter, Quota, RateLimiter};
 use reqwest::{Client, ClientBuilder};
 use speciam::{
     CannotBeABase, DepthLimit, Domains, LimitedUrl, RobotsCheck, ThreadLimiter, VisitCache,
@@ -76,6 +78,7 @@ pub struct RunState {
     pub secondary_depth: DepthLimit,
     pub primary_domains: Box<[String]>,
     pub download_targets: Arc<Mutex<HashSet<String>>>,
+    pub ip_limiter: Arc<(DefaultKeyedRateLimiter<String>, Jitter)>,
     pub interactive: bool,
     pub progress: Option<DlProgress>,
     #[cfg(feature = "resume")]
@@ -209,6 +212,10 @@ impl ResolvedArgs {
                 secondary_depth: self.secondary_depth,
                 primary_domains: self.primary_domains.into(),
                 download_targets: Arc::default(),
+                ip_limiter: Arc::new((
+                    RateLimiter::keyed(Quota::with_period(self.delay).unwrap()),
+                    Jitter::new(Duration::ZERO, self.jitter),
+                )),
                 interactive: !self.no_prompt,
                 progress: self.bars.then(|| DlProgress::new()),
                 #[cfg(feature = "resume")]

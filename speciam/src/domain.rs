@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{net::IpAddr, time::Duration};
 
 use bare_err_tree::err_tree;
 use governor::{DefaultKeyedRateLimiter, Jitter, Quota, RateLimiter};

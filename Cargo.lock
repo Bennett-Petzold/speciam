@@ -2030,6 +2030,7 @@ dependencies = [
  "console",
  "console-subscriber",
  "futures",
+ "governor",
  "indicatif",
  "once_map",
  "reqwest",
