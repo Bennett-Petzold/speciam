@@ -1,7 +1,9 @@
 use std::{
-    borrow::Borrow,
+    borrow::{Borrow, BorrowMut},
+    cell::{Cell, LazyCell, RefCell, UnsafeCell},
     cmp,
     collections::HashMap,
+    net::IpAddr,
     ops::{Deref, DerefMut},
     path::PathBuf,
     sync::{
@@ -13,9 +15,10 @@ use std::{
 
 use console::{Style, Term};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use once_map::OnceMap;
 use reqwest::Version;
 use speciam::LimitedUrl;
-use tokio::time::sleep;
+use tokio::{task::yield_now, time::sleep};
 
 #[derive(Debug, Clone, Copy)]
 pub enum VerOpt {
@@ -25,29 +28,25 @@ pub enum VerOpt {
     Unknown,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ProgBarVer {
     pub bar: ProgressBar,
     base: String,
-    version: RwLock<VerOpt>,
+    ip: Arc<RwLock<Option<String>>>,
+    version: Arc<RwLock<VerOpt>>,
 }
 
-impl Clone for ProgBarVer {
-    fn clone(&self) -> Self {
-        Self {
-            bar: self.bar.clone(),
-            base: self.base.clone(),
-            version: RwLock::new(*self.version.read().unwrap()),
-        }
-    }
-}
+// Bypass UnsafeCell lint
+unsafe impl Send for ProgBarVer {}
+unsafe impl Sync for ProgBarVer {}
 
 impl ProgBarVer {
-    pub fn new(base: String, term_width: u16, before_bar: u16) -> Self {
+    pub fn new(base: String, ip: Option<String>, term_width: u16, before_bar: u16) -> Self {
         let this = Self {
-            bar: ProgressBar::with_draw_target(Some(1), ProgressDrawTarget::hidden()),
+            bar: ProgressBar::with_draw_target(Some(0), ProgressDrawTarget::hidden()),
             base,
-            version: VerOpt::Unknown.into(),
+            ip: Arc::new(ip.into()),
+            version: Arc::new(VerOpt::Unknown.into()),
         };
 
         this.update_style(term_width, before_bar);
@@ -87,10 +86,23 @@ impl ProgBarVer {
             VerOpt::Both => "(HTTP/*)",
         };
 
+        let (heading, heading_len) = if let Some(ip) = &*self.ip.read().unwrap() {
+            let no_special = "(".len() + ip.len() + ") ".len() + self.base.len();
+            (
+                "(".to_string()
+                    + &Style::new().yellow().apply_to(ip).to_string()
+                    + ") "
+                    + &self.base,
+                no_special as u16,
+            )
+        } else {
+            (self.base.clone(), self.base.len() as u16)
+        };
+
         self.bar.set_style(
             ProgressStyle::with_template(
-                &(self.base.to_string()
-                    + &(0..(before_bar - self.base.len() as u16))
+                &(heading
+                    + &(0..(before_bar - heading_len))
                         .map(|_| " ")
                         .collect::<String>()
                     + " "
@@ -132,7 +144,8 @@ pub struct DlProgress {
     write: ProgressBar,
     write_progress: Arc<AtomicU64>,
     count: Arc<AtomicUsize>,
-    per_domain: Arc<RwLock<HashMap<String, ProgBarVer>>>,
+    per_domain: Arc<OnceMap<String, ProgBarVer>>,
+    per_domain_inc: Arc<OnceMap<String, Box<Mutex<()>>>>,
     columns: u16,
     before_bar: Arc<RwLock<u16>>,
 }
@@ -196,7 +209,8 @@ impl DlProgress {
             }
         });
 
-        let per_domain: Arc<RwLock<HashMap<String, ProgBarVer>>> = Arc::default();
+        let per_domain: Arc<OnceMap<String, ProgBarVer>> = Arc::default();
+        let per_domain_inc: Arc<OnceMap<String, Box<Mutex<()>>>> = Arc::default();
 
         let (_, columns) = Term::stderr().size();
 
@@ -210,6 +224,7 @@ impl DlProgress {
             write_progress,
             count: AtomicUsize::new(0).into(),
             per_domain,
+            per_domain_inc,
             columns,
             before_bar: Arc::new(0.into()),
         }
@@ -237,134 +252,185 @@ impl DlProgress {
         !bar.is_hidden() && (bar.length().unwrap_or(0) == bar.position())
     }
 
-    pub fn register<U: Borrow<LimitedUrl>>(&self, url: U) {
+    pub fn register<U: Borrow<LimitedUrl>>(&self, url: U, ip: Option<IpAddr>) {
         self.total.inc_length(1);
 
         let url = url.borrow();
         let base = url.url_base();
-        let read_handle = self.per_domain.read().unwrap();
+        let ip = ip.map(|x| x.to_string());
 
-        if let Some(bar) = read_handle.get(base) {
-            bar.inc_length(1);
+        let mut updated_before_bar = None;
+        let bar = self.per_domain.map_insert(
+            base.to_string(),
+            |base| {
+                let len = {
+                    let new_len = if let Some(ref ip) = ip {
+                        (base.len() + " (".len() + ip.len() + ")".len()) as u16
+                    } else {
+                        base.len() as u16
+                    };
 
-            // Un-hide a hidden bar, if there's space for it.
-            if bar.is_hidden() && read_handle.values().any(Self::empty_target) {
-                drop(read_handle);
+                    let before_bar_handle = self.before_bar.read().unwrap();
+                    if *before_bar_handle < new_len {
+                        drop(before_bar_handle);
 
-                let mut write_handle = self.per_domain.write().unwrap();
-                if let Some(empty_bar) = write_handle.values().find(|b| Self::empty_target(b)) {
+                        let mut before_bar_write = self.before_bar.write().unwrap();
+                        if *before_bar_write < new_len {
+                            *before_bar_write = new_len;
+                            updated_before_bar = Some(new_len);
+                        }
+
+                        new_len
+                    } else {
+                        *before_bar_handle
+                    }
+                };
+
+                let mut bar = ProgBarVer::new(base.clone(), ip, self.columns, len);
+                bar.bar = self.multi.add(bar.bar);
+
+                if self.count.fetch_add(1, Ordering::AcqRel) >= DOMAIN_LINE_LIMIT {
+                    self.count.fetch_sub(1, Ordering::Release);
+                    bar.bar.set_draw_target(ProgressDrawTarget::hidden());
+                }
+
+                bar
+            },
+            |_, bar| bar.clone(),
+        );
+
+        bar.inc_length(1);
+
+        if let Some(new_len) = updated_before_bar {
+            let before_bar = self.before_bar.read().unwrap();
+            if new_len == *before_bar {
+                let read_handle = self.per_domain.read_only_view();
+
+                read_handle.values().for_each(|v| {
+                    v.update_style(self.columns, new_len);
+                });
+                read_handle.values().for_each(|v| {
+                    v.tick();
+                });
+            }
+        }
+
+        // Un-hide a hidden bar, if there's space for it.
+        if bar.is_hidden() {
+            let read_handle = self.per_domain.read_only_view();
+            if read_handle.values().any(Self::empty_target) {
+                if let Some(empty_bar) = read_handle.values().find(|b| Self::empty_target(b)) {
                     // Hide the empty other bar
                     empty_bar.set_draw_target(ProgressDrawTarget::hidden());
 
                     // Make bar visible again
-                    let bar = write_handle.get_mut(base).unwrap();
-                    bar.bar = self.multi.add(bar.bar.clone());
+                    self.multi.add(bar.bar.clone());
                     bar.tick()
                 }
             }
-        } else {
-            // Update all lens for nice rendering, if necessary
-            let len = {
-                let before_bar_handle = self.before_bar.read().unwrap();
-                if *before_bar_handle < base.len() as u16 {
-                    drop(before_bar_handle);
-                    let new_len = base.len() as u16;
-
-                    *self.before_bar.write().unwrap() = new_len;
-                    read_handle.values().for_each(|v| {
-                        v.update_style(self.columns, new_len);
-                    });
-                    read_handle.values().for_each(|v| {
-                        v.tick();
-                    });
-
-                    new_len
-                } else {
-                    *before_bar_handle
-                }
-            };
-
-            drop(read_handle);
-
-            // Create new bar entry
-
-            let mut bar = ProgBarVer::new(base.to_string(), self.columns, len);
-
-            let mut write_handle = self.per_domain.write().unwrap();
-            if let Some(bar) = write_handle.get(base) {
-                bar.inc_length(1);
-            } else {
-                if self.count.load(Ordering::Acquire) > DOMAIN_LINE_LIMIT {
-                    if let Some(empty_bar) = write_handle.values().find(|b| Self::empty_target(b)) {
-                        // Hide the empty other bar
-                        empty_bar.set_draw_target(ProgressDrawTarget::hidden());
-                    } else {
-                        // Hide the smallest bar to make space
-                        let mut unhidden_bars: Vec<_> =
-                            write_handle.values().filter(|x| !x.is_hidden()).collect();
-                        unhidden_bars.sort_unstable_by_key(|x| x.length());
-
-                        unhidden_bars
-                            .first()
-                            .unwrap()
-                            .set_draw_target(ProgressDrawTarget::hidden());
-                    }
-                } else {
-                    self.count.fetch_add(1, Ordering::Release);
-                }
-
-                bar.bar = self.multi.add(bar.bar);
-                bar.tick();
-                write_handle.insert(base.to_string(), bar);
-            }
-        };
+        }
     }
 
-    pub fn free<U: Borrow<LimitedUrl>>(&self, url: U, version: Option<Version>) {
+    pub async fn free<U: Borrow<LimitedUrl>>(
+        &self,
+        url: U,
+        ip: Option<IpAddr>,
+        version: Option<Version>,
+    ) {
         self.total.inc(1);
-
         let base = url.borrow().url_base();
+        let ip = ip.map(|x| x.to_string());
 
-        let free_logic = |bar: ProgBarVer, read_handle: RwLockReadGuard<HashMap<_, _>>| {
-            bar.inc(1);
-            if bar.update_ver(version) {
-                bar.update_style(self.columns, *self.before_bar.read().unwrap());
-            }
-
-            // Un-hide a bar, if possible
-            if bar.is_hidden()
-                && (self.count.load(Ordering::Acquire) < DOMAIN_LINE_LIMIT
-                    || read_handle.values().any(Self::empty_target))
+        loop {
+            if let Some(bar) = self
+                .per_domain
+                .map_get(&base.to_string(), |_, bar| bar.clone())
             {
-                drop(read_handle);
+                // Exclusive access to avoid going over length
+                let handle = self
+                    .per_domain_inc
+                    .insert(base.to_string(), |_| Box::new(Mutex::new(())))
+                    .lock();
 
-                let mut write_handle = self.per_domain.write().unwrap();
-                if let Some(empty_bar) = write_handle.values().find(|b| Self::empty_target(b)) {
-                    // Hide the empty other bar
-                    empty_bar.set_draw_target(ProgressDrawTarget::hidden());
+                // Yield if capacity hasn't been allocated for this free yet
+                if bar.length().unwrap_or(0) > bar.position() {
+                    bar.inc(1);
+                    drop(handle);
 
-                    // Make bar visible again
-                    let bar = write_handle.get_mut(base).unwrap();
-                    bar.bar = self.multi.add(bar.bar.clone());
-                    bar.tick()
+                    if bar.update_ver(version) {
+                        bar.update_style(self.columns, *self.before_bar.read().unwrap());
+                    }
+
+                    // Un-hide the bar, if possible
+                    if bar.is_hidden() {
+                        if self.count.fetch_add(1, Ordering::AcqRel) < DOMAIN_LINE_LIMIT {
+                            // Make bar visible again
+                            self.multi.add(bar.bar.clone());
+                            bar.tick()
+                        } else {
+                            self.count.fetch_sub(1, Ordering::Release);
+                            if self
+                                .per_domain
+                                .read_only_view()
+                                .values()
+                                .any(Self::empty_target)
+                            {
+                                if let Some(empty_bar) = self
+                                    .per_domain
+                                    .read_only_view()
+                                    .values()
+                                    .find(|b| Self::empty_target(b))
+                                {
+                                    // Hide the empty other bar
+                                    empty_bar.set_draw_target(ProgressDrawTarget::hidden());
+
+                                    // Make bar visible again
+                                    self.multi.add(bar.bar.clone());
+                                    bar.tick()
+                                }
+                            }
+                        }
+                    }
+
+                    // Update IP address
+                    if let Some(ip) = ip {
+                        if (*bar.ip.read().unwrap()).as_ref() != Some(&ip) {
+                            *bar.ip.write().unwrap() = Some(ip.clone());
+
+                            let before_bar = self.before_bar.read().unwrap();
+                            let new_len = (base.len() + " (".len() + ip.len() + ")".len()) as u16;
+                            if new_len > *before_bar {
+                                drop(before_bar);
+
+                                let mut before_bar = self.before_bar.write().unwrap();
+                                if new_len > *before_bar {
+                                    *before_bar = new_len;
+                                    let read_handle = self.per_domain.read_only_view();
+
+                                    read_handle.values().for_each(|v| {
+                                        v.update_style(self.columns, new_len);
+                                    });
+                                    read_handle.values().for_each(|v| {
+                                        v.tick();
+                                    });
+                                } else {
+                                    bar.update_style(self.columns, *before_bar);
+                                }
+                            } else {
+                                bar.update_style(self.columns, *before_bar);
+                            }
+                        }
+                    }
+                } else {
+                    drop(handle);
+                    // Give the initializer a chance to run
+                    yield_now().await;
                 }
+                break;
+            } else {
+                // Give the initializer a chance to run
+                yield_now().await;
             }
-        };
-
-        let read_handle = self.per_domain.read().unwrap();
-        if let Some(bar) = read_handle.get(base) {
-            free_logic(bar.clone(), read_handle);
-        } else {
-            drop(read_handle);
-            let mut write_handle = self.per_domain.write().unwrap();
-            if !write_handle.contains_key(base) {
-                let bar = ProgBarVer::new(base.to_string(), self.columns, 0);
-                write_handle.insert(base.to_string(), bar);
-            }
-            drop(write_handle);
-
-            let read_handle = self.per_domain.read().unwrap();
-            free_logic(read_handle.get(base).unwrap().clone(), read_handle);
         }
     }
 
@@ -421,8 +487,7 @@ impl DlProgress {
         self.multi.remove(&self.total);
         self.multi.remove(&self.write);
         self.per_domain
-            .read()
-            .unwrap()
+            .read_only_view()
             .values()
             .for_each(|v| self.multi.remove(&v.bar));
     }

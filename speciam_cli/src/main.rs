@@ -3,6 +3,7 @@ use std::{
     collections::HashMap,
     error::Error,
     future::Future,
+    net::IpAddr,
     panic,
     path::PathBuf,
     pin::Pin,
@@ -112,6 +113,7 @@ enum ProcessReturn {
     Download(
         (
             LimitedUrl,
+            Option<IpAddr>,
             Vec<LimitedUrl>,
             Option<WriteHandle>,
             Option<Version>,
@@ -201,6 +203,7 @@ async fn exec_process(
 
                                         return Ok(ProcessReturn::Download((
                                             url.clone(),
+                                            ip,
                                             run_state.visited.get(url).unwrap(),
                                             None,
                                             Some(version),
@@ -248,6 +251,7 @@ async fn exec_process(
 
             Ok(ProcessReturn::Download((
                 url.clone(),
+                ip,
                 run_state.visited.get(url).unwrap(),
                 write_handle,
                 Some(version),
@@ -423,16 +427,21 @@ impl<T, U: Clone + Unpin> Future for HandleWithPayload<T, U> {
 }
 
 async fn execute(pending: Vec<LimitedUrl>, mut run_state: RunState) {
-    let prog_reg = |x: &LimitedUrl, progress: &Option<DlProgress>| {
+    let prog_reg = |x: &LimitedUrl, ip: Option<IpAddr>, progress: &Option<DlProgress>| {
         if let Some(progress) = progress {
-            progress.register(x);
+            progress.register(x, ip);
         }
     };
-    let prog_free = |x: &LimitedUrl, version: Option<Version>, progress: &Option<DlProgress>| {
+    async fn prog_free(
+        x: &LimitedUrl,
+        ip: Option<IpAddr>,
+        version: Option<Version>,
+        progress: &Option<DlProgress>,
+    ) {
         if let Some(progress) = &progress {
-            progress.free(x, version);
+            progress.free(x, ip, version).await;
         }
-    };
+    }
     let prog_reg_write = |x: PathBuf, predict: Option<u64>, progress: &Option<DlProgress>| {
         if let Some(progress) = &progress {
             progress.register_write(x, predict)
@@ -537,7 +546,7 @@ async fn execute(pending: Vec<LimitedUrl>, mut run_state: RunState) {
                         // Dispatch unique URLs
                         speciam::VisitCacheRes::Unique => {
                             // Considered committed to dispatch for progress tracking
-                            prog_reg(&url, &progress);
+                            prog_reg(&url, None, &progress);
 
                             visited_passed_tx.send(url.clone()).unwrap();
                         }
@@ -627,7 +636,7 @@ async fn execute(pending: Vec<LimitedUrl>, mut run_state: RunState) {
                     match exec_process(next, run_state.clone()).await {
                         Ok(exec_next) => match exec_next {
                             ProcessReturn::NoOp(source) => {
-                                prog_free(&source, None, &run_state.progress);
+                                prog_free(&source, None, None, &run_state.progress).await;
 
                                 #[cfg(feature = "resume")]
                                 if !run_state.config_only {
@@ -637,8 +646,8 @@ async fn execute(pending: Vec<LimitedUrl>, mut run_state: RunState) {
                                 }
                                 preprocessing.fetch_sub(1, Ordering::Release);
                             }
-                            ProcessReturn::Download((source, mut scrape, wh, ver)) => {
-                                prog_free(&source, ver, &run_state.progress);
+                            ProcessReturn::Download((source, ip, mut scrape, wh, ver)) => {
+                                prog_free(&source, ip, ver, &run_state.progress).await;
                                 scrape.retain(|x| {
                                     (source.url_base() == x.url_base())
                                         || run_state
@@ -713,7 +722,7 @@ async fn execute(pending: Vec<LimitedUrl>, mut run_state: RunState) {
                             event!(Level::ERROR, "{:#?}", error);
 
                             if let ProcessingErr::Reqwest(e) = &*e {
-                                prog_free(&url, None, &run_state.progress);
+                                prog_free(&url, None, None, &run_state.progress).await;
 
                                 #[cfg(feature = "resume")]
                                 if !run_state.config_only && e.status() == Some(StatusCode::GONE) {
